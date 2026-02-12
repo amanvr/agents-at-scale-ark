@@ -780,7 +780,7 @@ func (r *QueryReconciler) dispatchAgent(ctx context.Context, query arkv1alpha1.Q
 	}
 
 	agentAnnotations := []map[string]string(nil)
-	if agentCRD.Annotations != nil {
+	if shouldIncludeAgentAnnotationsForA2A(agentCRD.Annotations) {
 		agentAnnotations = []map[string]string{agentCRD.Annotations}
 	}
 	useA2A := genai.ResolveA2AExperimentalEnabled(nil, query.Annotations, agentAnnotations)
@@ -799,6 +799,13 @@ func (r *QueryReconciler) dispatchAgent(ctx context.Context, query arkv1alpha1.Q
 	}
 	result, err := r.executeAgent(ctx, query, &agentCRD, impersonatedClient, memory, eventStream, span)
 	return result, payloadMode, err
+}
+
+func shouldIncludeAgentAnnotationsForA2A(agentAnnotations map[string]string) bool {
+	if agentAnnotations == nil {
+		return false
+	}
+	return agentAnnotations[annotations.A2AServerAddress] != "" || agentAnnotations[annotations.A2AExperimentalEnabled] != ""
 }
 
 func (r *QueryReconciler) dispatchTeam(ctx context.Context, query arkv1alpha1.Query, teamName string, impersonatedClient client.Client, memory genai.MemoryInterface, eventStream genai.EventStreamInterface, span telemetry.Span) (*genai.ExecutionResult, string, error) {
