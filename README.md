@@ -54,6 +54,18 @@ To troubleshoot an installation, run `ark status`.
 
 ARK is a runtime environment built on Kubernetes to host AI agents - with built-in CRDs for agents, models, memory, tools, and evaluation, it abstracts away plumbing so teams can build agentic applications faster and reliably.
 
+## A2A protocol support
+
+Ark supports the [A2A (Agent-to-Agent) protocol](https://github.com/a2aproject/A2A) for streaming communication with external agents. External agents hosted via `A2AServer` resources are automatically discovered and queryable.
+
+Ark also includes an experimental A2A-native execution mode behind `ark.mckinsey.com/a2a-experimental-enabled: "true"`. In this mode:
+
+- Ark executes agent and team targets with `protocol.Message` end-to-end.
+- Agents must use an A2A-compatible execution engine (`executionEngine` required, no local OpenAI execution path).
+- Existing OpenAI-format memory records are still readable for compatibility.
+
+See the [RFC: Experimental A2A transport](https://mckinsey.github.io/agents-at-scale-ark/reference/a2a-experimental-rfc) for details and constraints.
+
 ## Technical Preview
 
 Agents at Scale - Agentic Runtime for Kubernetes ("Ark") is released as a technical preview and early access release. This software is provided as a Request for Comments (RFC) to share elements of our technical approach with the broader technology community, gather valuable feedback, and seek input from practitioners and researchers in the field of agentic AI systems and Kubernetes orchestration.

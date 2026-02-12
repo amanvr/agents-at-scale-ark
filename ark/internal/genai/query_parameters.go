@@ -2,11 +2,13 @@ package genai
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"trpc.group/trpc-go/trpc-a2a-go/protocol"
 
 	arkv1alpha1 "mckinsey.com/ark/api/v1alpha1"
 	"mckinsey.com/ark/internal/common"
@@ -155,13 +157,7 @@ func GetQueryInputMessages(ctx context.Context, query arkv1alpha1.Query, k8sClie
 		}
 
 		messages := make([]Message, 0, len(openaiMessages))
-		for i := range openaiMessages {
-			converted, convErr := OpenAIToA2AMessage(openaiMessages[i])
-			if convErr != nil {
-				return nil, fmt.Errorf("failed to convert input message %d: %w", i, convErr)
-			}
-			messages = append(messages, converted)
-		}
+		messages = append(messages, openaiMessages...)
 		return messages, nil
 	}
 
@@ -175,6 +171,38 @@ func GetQueryInputMessages(ctx context.Context, query arkv1alpha1.Query, k8sClie
 		return nil, fmt.Errorf("failed to resolve query input: %w", err)
 	}
 	return []Message{NewUserMessage(resolvedInput)}, nil
+}
+
+// GetQueryInputA2AMessages returns A2A-native input messages for experimental execution.
+func GetQueryInputA2AMessages(ctx context.Context, query arkv1alpha1.Query, k8sClient client.Client) ([]protocol.Message, error) {
+	queryType := query.Spec.Type
+	if queryType == "" {
+		queryType = RoleUser
+	}
+
+	if queryType != RoleUser {
+		var messages []protocol.Message
+		if err := json.Unmarshal(query.Spec.Input.Raw, &messages); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal input as A2A messages: %w", err)
+		}
+		return messages, nil
+	}
+
+	inputString, err := query.Spec.GetInputString()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get input string: %w", err)
+	}
+
+	resolvedInput, err := ResolveQueryInput(ctx, k8sClient, query.Namespace, inputString, query.Spec.Parameters)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve query input: %w", err)
+	}
+
+	return []protocol.Message{
+		protocol.NewMessage(protocol.MessageRoleUser, []protocol.Part{
+			protocol.NewTextPart(resolvedInput),
+		}),
+	}, nil
 }
 
 // toAnyMap converts map[string]string to map[string]any

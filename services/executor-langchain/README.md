@@ -11,4 +11,7 @@ make dev      # Run in development mode
 
 ## Notes
 - Requires Python with uv package manager
-- Provides FastAPI web server for execution requests 
+- Provides FastAPI web server for execution requests
+- Compat endpoint: `POST /execute` via engine type `langchain`
+- Native endpoint: `POST /execute-a2a` via engine type `a2a-langchain`
+- `a2a-langchain` registration is optional via Helm value `a2aExecutionEngine.enabled`

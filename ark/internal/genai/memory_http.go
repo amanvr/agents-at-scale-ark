@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/openai/openai-go"
 	"mckinsey.com/ark/internal/common"
 	"mckinsey.com/ark/internal/eventing"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -157,7 +158,7 @@ func (m *HTTPMemory) resolveAndUpdateAddress(ctx context.Context) error {
 	return nil
 }
 
-// AddMessages stores messages to the memory backend
+// AddMessages stores messages to the memory backend in OpenAI format.
 func (m *HTTPMemory) AddMessages(ctx context.Context, queryID string, messages []Message) error {
 	if len(messages) == 0 {
 		return nil
@@ -172,39 +173,17 @@ func (m *HTTPMemory) AddMessages(ctx context.Context, queryID string, messages [
 		return err
 	}
 
-	payloadMode := GetA2APayloadModeFromContext(ctx)
 	var reqBody []byte
 	var err error
-	if payloadMode == A2APayloadModeNative {
-		reqBody, err = json.Marshal(struct {
-			ConversationID string    `json:"conversation_id,omitempty"`
-			QueryID        string    `json:"query_id"`
-			Messages       []Message `json:"messages"`
-		}{
-			ConversationID: m.conversationId,
-			QueryID:        queryID,
-			Messages:       messages,
-		})
-	} else {
-		compatMessages := make([]interface{}, 0, len(messages))
-		for _, msg := range messages {
-			oaiMsg, convErr := A2AToOpenAIMessage(msg)
-			if convErr != nil {
-				compatMessages = append(compatMessages, msg)
-				continue
-			}
-			compatMessages = append(compatMessages, oaiMsg)
-		}
-		reqBody, err = json.Marshal(struct {
-			ConversationID string        `json:"conversation_id,omitempty"`
-			QueryID        string        `json:"query_id"`
-			Messages       []interface{} `json:"messages"`
-		}{
-			ConversationID: m.conversationId,
-			QueryID:        queryID,
-			Messages:       compatMessages,
-		})
-	}
+	reqBody, err = json.Marshal(struct {
+		ConversationID string                                   `json:"conversation_id,omitempty"`
+		QueryID        string                                   `json:"query_id"`
+		Messages       []openai.ChatCompletionMessageParamUnion `json:"messages"`
+	}{
+		ConversationID: m.conversationId,
+		QueryID:        queryID,
+		Messages:       messages,
+	})
 	if err != nil {
 		operationData := map[string]string{"result": fmt.Sprintf("Failed to serialize messages: %v", err)}
 		m.eventingRecorder.Fail(ctx, "MemoryAddMessages", operationData["result"], err, operationData)
@@ -251,11 +230,115 @@ func (m *HTTPMemory) AddMessages(ctx context.Context, queryID string, messages [
 	return nil
 }
 
-// GetMessages retrieves messages from the memory backend
+// GetMessages retrieves messages from the memory backend as OpenAI types.
 func (m *HTTPMemory) GetMessages(ctx context.Context) ([]Message, error) {
+	records, err := m.fetchMessageRecords(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	messages := make([]Message, 0, len(records))
+	for i, record := range records {
+		a2aMessage, err := unmarshalMessageRobust(record.Message)
+		if err != nil {
+			return nil, fmt.Errorf("failed to unmarshal message at index %d: %w", i, err)
+		}
+		openaiMessage, convErr := A2AToOpenAIMessage(a2aMessage)
+		if convErr != nil {
+			return nil, fmt.Errorf("failed to convert message at index %d: %w", i, convErr)
+		}
+		messages = append(messages, openaiMessage)
+	}
+	return messages, nil
+}
+
+func (m *HTTPMemory) AddA2AMessages(ctx context.Context, queryID string, messages []protocol.Message) error {
+	if len(messages) == 0 {
+		return nil
+	}
+
+	ctx = m.eventingRecorder.Start(ctx, "MemoryAddMessages", "Adding messages to memory", nil)
+
+	if err := m.resolveAndUpdateAddress(ctx); err != nil {
+		operationData := map[string]string{"result": fmt.Sprintf("Failed to resolve memory address: %v", err)}
+		m.eventingRecorder.Fail(ctx, "MemoryAddMessages", operationData["result"], err, operationData)
+		return err
+	}
+
+	reqBody, err := json.Marshal(struct {
+		ConversationID string             `json:"conversation_id,omitempty"`
+		QueryID        string             `json:"query_id"`
+		Messages       []protocol.Message `json:"messages"`
+	}{
+		ConversationID: m.conversationId,
+		QueryID:        queryID,
+		Messages:       messages,
+	})
+	if err != nil {
+		operationData := map[string]string{"result": fmt.Sprintf("Failed to serialize messages: %v", err)}
+		m.eventingRecorder.Fail(ctx, "MemoryAddMessages", operationData["result"], err, operationData)
+		return fmt.Errorf("failed to serialize messages: %w", err)
+	}
+
+	requestURL := fmt.Sprintf("%s%s", m.baseURL, MessagesEndpoint)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, bytes.NewReader(reqBody))
+	if err != nil {
+		operationData := map[string]string{"result": fmt.Sprintf("Failed to create request: %v", err)}
+		m.eventingRecorder.Fail(ctx, "MemoryAddMessages", operationData["result"], err, operationData)
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", ContentTypeJSON)
+	req.Header.Set("User-Agent", UserAgent)
+
+	for name, value := range m.headers {
+		req.Header.Set(name, value)
+	}
+
+	resp, err := m.httpClient.Do(req)
+	if err != nil {
+		operationData := map[string]string{"result": fmt.Sprintf("HTTP request failed: %v", err)}
+		m.eventingRecorder.Fail(ctx, "MemoryAddMessages", operationData["result"], err, operationData)
+		return fmt.Errorf("HTTP request failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		err := fmt.Errorf("HTTP status %d", resp.StatusCode)
+		operationData := map[string]string{"result": err.Error()}
+		m.eventingRecorder.Fail(ctx, "MemoryAddMessages", operationData["result"], err, operationData)
+		return err
+	}
+
+	operationData := map[string]string{
+		"messages":       fmt.Sprintf("%d", len(messages)),
+		"conversationId": m.conversationId,
+		"result":         "Memory add messages completed successfully",
+	}
+	m.eventingRecorder.Complete(ctx, "MemoryAddMessages", operationData["result"], operationData)
+	return nil
+}
+
+func (m *HTTPMemory) GetA2AMessages(ctx context.Context) ([]protocol.Message, error) {
+	records, err := m.fetchMessageRecords(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	messages := make([]protocol.Message, 0, len(records))
+	for i, record := range records {
+		a2aMessage, err := unmarshalMessageRobust(record.Message)
+		if err != nil {
+			return nil, fmt.Errorf("failed to unmarshal message at index %d: %w", i, err)
+		}
+		messages = append(messages, a2aMessage)
+	}
+	return messages, nil
+}
+
+func (m *HTTPMemory) fetchMessageRecords(ctx context.Context) ([]MessageRecord, error) {
 	ctx = m.eventingRecorder.Start(ctx, "MemoryGetMessages", "Getting messages from memory", nil)
 
-	// Resolve address dynamically
 	if err := m.resolveAndUpdateAddress(ctx); err != nil {
 		operationData := map[string]string{"result": fmt.Sprintf("Failed to resolve memory address: %v", err)}
 		m.eventingRecorder.Fail(ctx, "MemoryGetMessages", operationData["result"], err, operationData)
@@ -273,7 +356,6 @@ func (m *HTTPMemory) GetMessages(ctx context.Context) ([]Message, error) {
 	req.Header.Set("Accept", ContentTypeJSON)
 	req.Header.Set("User-Agent", UserAgent)
 
-	// Add custom headers
 	for name, value := range m.headers {
 		req.Header.Set(name, value)
 	}
@@ -300,23 +382,12 @@ func (m *HTTPMemory) GetMessages(ctx context.Context) ([]Message, error) {
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
 
-	messages := make([]Message, 0, len(response.Messages))
-	for i, record := range response.Messages {
-		a2aMessage, err := unmarshalMessageRobust(record.Message)
-		if err != nil {
-			operationData := map[string]string{"result": fmt.Sprintf("Failed to unmarshal message at index %d: %v", i, err)}
-			m.eventingRecorder.Fail(ctx, "MemoryGetMessages", operationData["result"], err, operationData)
-			return nil, fmt.Errorf("failed to unmarshal message at index %d: %w", i, err)
-		}
-		messages = append(messages, a2aMessage)
-	}
-
 	operationData := map[string]string{
-		"messages": fmt.Sprintf("%d", len(messages)),
+		"messages": fmt.Sprintf("%d", len(response.Messages)),
 		"result":   "Memory get messages completed successfully",
 	}
 	m.eventingRecorder.Complete(ctx, "MemoryGetMessages", operationData["result"], operationData)
-	return messages, nil
+	return response.Messages, nil
 }
 
 // GetConversationID returns the current conversation ID

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	arkann "mckinsey.com/ark/internal/annotations"
 	"trpc.group/trpc-go/trpc-a2a-go/protocol"
 )
 
@@ -45,16 +46,20 @@ func TestStreamA2AEventNative(t *testing.T) {
 
 func TestStreamA2AErrorNative(t *testing.T) {
 	ctx := context.Background()
+	ctx = WithA2AContextID(ctx, "ctx-err")
+	ctx = WithQueryContext(ctx, "query-err", "session-1", "query-name")
 	stream := &fakeEventStream{}
 
 	streamA2AError(ctx, stream, A2APayloadModeNative, "agent/test", errors.New("boom"))
 
 	assert.Len(t, stream.chunks, 1)
-	message, ok := stream.chunks[0].(*protocol.Message)
+	event, ok := stream.chunks[0].(*protocol.TaskStatusUpdateEvent)
 	assert.True(t, ok)
-	assert.Equal(t, protocol.KindMessage, message.Kind)
-	assert.Equal(t, protocol.MessageRoleAgent, message.Role)
-	assert.Equal(t, "boom", extractTextFromParts(message.Parts))
+	assert.Equal(t, protocol.TaskStateFailed, event.Status.State)
+	assert.True(t, event.Final)
+	assert.Equal(t, "ctx-err", event.ContextID)
+	assert.NotNil(t, event.Status.Message)
+	assert.Equal(t, "boom", extractTextFromParts(event.Status.Message.Parts))
 }
 
 func TestConsumeA2AStreamEventsMessageCompat(t *testing.T) {
@@ -172,4 +177,22 @@ func TestConsumeA2AStreamEventsNoEvents(t *testing.T) {
 	_, err := engine.consumeA2AStreamEvents(ctx, events, stream, A2APayloadModeCompat, "agent/test", "completion-1", "agent", "default", "query", nil)
 
 	assert.Error(t, err)
+}
+
+func TestResolveA2AExecutionPayloadModeDefaultsCompat(t *testing.T) {
+	mode := resolveA2AExecutionPayloadMode(context.Background(), nil)
+	assert.Equal(t, A2APayloadModeCompat, mode)
+}
+
+func TestResolveA2AExecutionPayloadModeUsesExperimentalContext(t *testing.T) {
+	ctx := WithA2AExperimentalEnabled(context.Background(), true)
+	mode := resolveA2AExecutionPayloadMode(ctx, nil)
+	assert.Equal(t, A2APayloadModeNative, mode)
+}
+
+func TestResolveA2AExecutionPayloadModeUsesAgentExperimentalAnnotation(t *testing.T) {
+	mode := resolveA2AExecutionPayloadMode(context.Background(), map[string]string{
+		arkann.A2AExperimentalEnabled: "true",
+	})
+	assert.Equal(t, A2APayloadModeNative, mode)
 }

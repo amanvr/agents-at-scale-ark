@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, patch
 
 from a2a.types import TaskState
 
+from ark_api.api.v1.a2agw.manager import DynamicManager
 from ark_api.api.v1.a2agw.execution import ARKAgentExecutor
 from ark_api.api.v1.a2agw.message_conversion import QueryPayload
 from ark_api.api.v1.a2agw.query import QueryExecutionResult
@@ -17,6 +18,10 @@ class TestA2AGatewayExecution(unittest.IsolatedAsyncioTestCase):
         context = SimpleNamespace(task_id="task-1", context_id="ctx-old", message=SimpleNamespace(parts=[]))
 
         with patch(
+            "ark_api.api.v1.a2agw.execution.ARKAgentExecutor._resolve_experimental_enabled",
+            new_callable=AsyncMock,
+            return_value=False,
+        ), patch(
             "ark_api.api.v1.a2agw.execution.build_query_payload",
             return_value=QueryPayload(query_type="user", input_data="hello", preview_text="hello"),
         ), patch(
@@ -35,6 +40,8 @@ class TestA2AGatewayExecution(unittest.IsolatedAsyncioTestCase):
 
         self.assertGreaterEqual(event_queue.enqueue_event.await_count, 3)
         mock_new_message.assert_any_call("done", context_id="ctx-new", task_id="task-1")
+        final_status_event = event_queue.enqueue_event.await_args_list[-1].args[0]
+        self.assertEqual(final_status_event.context_id, "ctx-new")
 
     async def test_execute_generates_context_and_task_ids_when_missing(self):
         executor = ARKAgentExecutor("test-agent", "default", timeout=1)
@@ -42,6 +49,10 @@ class TestA2AGatewayExecution(unittest.IsolatedAsyncioTestCase):
         context = SimpleNamespace(message=SimpleNamespace(parts=[]))
 
         with patch(
+            "ark_api.api.v1.a2agw.execution.ARKAgentExecutor._resolve_experimental_enabled",
+            new_callable=AsyncMock,
+            return_value=False,
+        ), patch(
             "ark_api.api.v1.a2agw.execution.build_query_payload",
             return_value=QueryPayload(query_type="user", input_data="hello", preview_text="hello"),
         ), patch(
@@ -64,6 +75,35 @@ class TestA2AGatewayExecution(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(generated_call.kwargs["task_id"])
         self.assertNotEqual(generated_call.kwargs["context_id"], "default")
         self.assertNotEqual(generated_call.kwargs["task_id"], "unknown")
+
+    async def test_execute_passes_experimental_flag_to_query_layer(self):
+        executor = ARKAgentExecutor("test-agent", "default", timeout=1)
+        event_queue = SimpleNamespace(enqueue_event=AsyncMock())
+        context = SimpleNamespace(task_id="task-1", context_id="ctx-old", message=SimpleNamespace(parts=[]))
+
+        with patch(
+            "ark_api.api.v1.a2agw.execution.ARKAgentExecutor._resolve_experimental_enabled",
+            new_callable=AsyncMock,
+            return_value=True,
+        ), patch(
+            "ark_api.api.v1.a2agw.execution.build_query_payload",
+            return_value=QueryPayload(query_type="messages", input_data=[{"role": "user", "parts": []}], preview_text="hello"),
+        ) as mock_build_query_payload, patch(
+            "ark_api.api.v1.a2agw.execution.post_query_and_wait",
+            new_callable=AsyncMock,
+            return_value=QueryExecutionResult(content="done", context_id="ctx-new"),
+        ) as mock_post_query, patch(
+            "ark_api.api.v1.a2agw.execution.new_agent_text_message",
+            side_effect=lambda text, context_id=None, task_id=None: {
+                "text": text,
+                "context_id": context_id,
+                "task_id": task_id,
+            },
+        ):
+            await executor.execute(context, event_queue)
+
+        mock_build_query_payload.assert_called_once_with(context, experimental_enabled=True)
+        self.assertTrue(mock_post_query.await_args.kwargs["experimental_enabled"])
 
     async def test_cancel_cancels_active_task(self):
         executor = ARKAgentExecutor("test-agent", "default", timeout=1)
@@ -115,3 +155,72 @@ class TestA2AGatewayExecution(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(executor.active_tasks, {})
         self.assertTrue(task_one.cancelled() or task_one.done())
         self.assertTrue(task_two.cancelled() or task_two.done())
+
+    async def test_manager_update_routes_reuses_task_store_per_agent(self):
+        manager = DynamicManager()
+        manager.agents = {"agent-1": SimpleNamespace(name="agent-1")}
+        captured_task_stores = []
+
+        class FakeAgentApp:
+            def add_route(self, path, handler, methods=None):
+                _ = path
+                _ = handler
+                _ = methods
+
+            async def __call__(self, scope, receive, send):
+                _ = scope
+                _ = receive
+                _ = send
+
+        class FakeA2AStarletteApplication:
+            def __init__(self, agent_card, http_handler):
+                _ = agent_card
+                captured_task_stores.append(http_handler.task_store)
+
+            def build(self):
+                return FakeAgentApp()
+
+        with patch(
+            "ark_api.api.v1.a2agw.manager.DefaultRequestHandler",
+            side_effect=lambda agent_executor, task_store: SimpleNamespace(
+                agent_executor=agent_executor,
+                task_store=task_store,
+            ),
+        ), patch(
+            "ark_api.api.v1.a2agw.manager.A2AStarletteApplication",
+            FakeA2AStarletteApplication,
+        ):
+            manager._update_routes()
+            first_store = manager.task_stores["agent-1"]
+            manager._update_routes()
+            second_store = manager.task_stores["agent-1"]
+
+        self.assertIs(first_store, second_store)
+        self.assertEqual(len(captured_task_stores), 2)
+        self.assertIs(captured_task_stores[0], captured_task_stores[1])
+
+    async def test_manager_sync_removes_orphaned_task_stores_after_grace_period(self):
+        manager = DynamicManager()
+        manager.agents = {"agent-1": SimpleNamespace(name="agent-1")}
+
+        class DummyExecutor:
+            async def cancel_all_tasks(self):
+                return None
+
+        manager.executors = {"agent-1": DummyExecutor()}
+        manager.task_stores = {"agent-1": object()}
+        manager.registry = SimpleNamespace(list_agents=AsyncMock(return_value=[]))
+
+        with patch.object(manager, "_update_routes"):
+            await manager._sync_with_registry()
+
+        self.assertIn("agent-1", manager.agents)
+        self.assertIn("agent-1", manager.task_stores)
+
+        with patch.object(manager, "_update_routes") as mock_update_routes:
+            await manager._sync_with_registry()
+
+        self.assertNotIn("agent-1", manager.agents)
+        self.assertNotIn("agent-1", manager.executors)
+        self.assertNotIn("agent-1", manager.task_stores)
+        mock_update_routes.assert_called_once()

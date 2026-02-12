@@ -2,6 +2,7 @@ package genai
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/openai/openai-go"
@@ -43,8 +44,8 @@ func TestGetQueryInputMessages(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, messages, 1)
 
-		assert.Equal(t, protocol.MessageRoleUser, messages[0].Role)
-		assert.Equal(t, "Hello, how are you?", extractTextFromParts(messages[0].Parts))
+		assert.Equal(t, RoleUser, resolveMessageRole(messages[0]))
+		assert.Equal(t, "Hello, how are you?", ExtractTextFromMessage(messages[0]))
 	})
 
 	t.Run("user type with template parameters", func(t *testing.T) {
@@ -95,8 +96,8 @@ func TestGetQueryInputMessages(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, messages, 1)
 
-		assert.Equal(t, protocol.MessageRoleUser, messages[0].Role)
-		assert.Equal(t, "What's the weather in Berlin?", extractTextFromParts(messages[0].Parts))
+		assert.Equal(t, RoleUser, resolveMessageRole(messages[0]))
+		assert.Equal(t, "What's the weather in Berlin?", ExtractTextFromMessage(messages[0]))
 	})
 
 	t.Run("messages type with multiple messages", func(t *testing.T) {
@@ -125,14 +126,14 @@ func TestGetQueryInputMessages(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, messages, 3)
 
-		assert.Equal(t, protocol.MessageRoleUser, messages[0].Role)
-		assert.Equal(t, "Hello!", extractTextFromParts(messages[0].Parts))
+		assert.Equal(t, RoleUser, resolveMessageRole(messages[0]))
+		assert.Equal(t, "Hello!", ExtractTextFromMessage(messages[0]))
 
-		assert.Equal(t, protocol.MessageRoleAgent, messages[1].Role)
-		assert.Equal(t, "Hi there! How can I help you?", extractTextFromParts(messages[1].Parts))
+		assert.Equal(t, RoleAssistant, resolveMessageRole(messages[1]))
+		assert.Equal(t, "Hi there! How can I help you?", ExtractTextFromMessage(messages[1]))
 
-		assert.Equal(t, protocol.MessageRoleUser, messages[2].Role)
-		assert.Equal(t, "What's the weather like?", extractTextFromParts(messages[2].Parts))
+		assert.Equal(t, RoleUser, resolveMessageRole(messages[2]))
+		assert.Equal(t, "What's the weather like?", ExtractTextFromMessage(messages[2]))
 	})
 
 	t.Run("messages type with system message", func(t *testing.T) {
@@ -160,12 +161,12 @@ func TestGetQueryInputMessages(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, messages, 2)
 
-		assert.Equal(t, protocol.MessageRoleAgent, messages[0].Role)
 		assert.Equal(t, RoleSystem, resolveMessageRole(messages[0]))
-		assert.Equal(t, "You are a helpful assistant.", extractTextFromParts(messages[0].Parts))
+		assert.Equal(t, RoleSystem, resolveMessageRole(messages[0]))
+		assert.Equal(t, "You are a helpful assistant.", ExtractTextFromMessage(messages[0]))
 
-		assert.Equal(t, protocol.MessageRoleUser, messages[1].Role)
-		assert.Equal(t, "Hello!", extractTextFromParts(messages[1].Parts))
+		assert.Equal(t, RoleUser, resolveMessageRole(messages[1]))
+		assert.Equal(t, "Hello!", ExtractTextFromMessage(messages[1]))
 	})
 
 	t.Run("messages type with tool message", func(t *testing.T) {
@@ -191,7 +192,7 @@ func TestGetQueryInputMessages(t *testing.T) {
 		messages, err := GetQueryInputMessages(ctx, query, k8sClient)
 		require.NoError(t, err)
 		require.Len(t, messages, 1)
-		assert.Equal(t, protocol.MessageRoleAgent, messages[0].Role)
+		assert.Equal(t, RoleTool, resolveMessageRole(messages[0]))
 		assert.Equal(t, RoleTool, resolveMessageRole(messages[0]))
 	})
 
@@ -216,8 +217,8 @@ func TestGetQueryInputMessages(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, messages, 1)
 
-		assert.Equal(t, protocol.MessageRoleUser, messages[0].Role)
-		assert.Equal(t, "Default behavior test", extractTextFromParts(messages[0].Parts))
+		assert.Equal(t, RoleUser, resolveMessageRole(messages[0]))
+		assert.Equal(t, "Default behavior test", ExtractTextFromMessage(messages[0]))
 	})
 
 	t.Run("user type with template resolution error", func(t *testing.T) {
@@ -336,5 +337,65 @@ func BenchmarkGetQueryInputMessages(b *testing.B) {
 				b.Fatal(err)
 			}
 		}
+	})
+}
+
+func TestGetQueryInputA2AMessages(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, arkv1alpha1.AddToScheme(scheme))
+
+	t.Run("messages type uses A2A input directly", func(t *testing.T) {
+		k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+		input := []protocol.Message{
+			protocol.NewMessage(protocol.MessageRoleUser, []protocol.Part{protocol.NewTextPart("hello")}),
+			protocol.NewMessage(protocol.MessageRoleAgent, []protocol.Part{protocol.NewTextPart("world")}),
+		}
+		raw, err := json.Marshal(input)
+		require.NoError(t, err)
+
+		query := arkv1alpha1.Query{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-query",
+				Namespace: "test-ns",
+			},
+			Spec: arkv1alpha1.QuerySpec{
+				Type: "messages",
+				Input: runtime.RawExtension{
+					Raw: raw,
+				},
+			},
+		}
+
+		messages, err := GetQueryInputA2AMessages(ctx, query, k8sClient)
+		require.NoError(t, err)
+		require.Len(t, messages, 2)
+		assert.Equal(t, protocol.MessageRoleUser, messages[0].Role)
+		assert.Equal(t, "hello", ExtractA2ATextFromMessage(messages[0]))
+		assert.Equal(t, protocol.MessageRoleAgent, messages[1].Role)
+		assert.Equal(t, "world", ExtractA2ATextFromMessage(messages[1]))
+	})
+
+	t.Run("user type resolves text input into a user message", func(t *testing.T) {
+		k8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+		query := arkv1alpha1.Query{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-query",
+				Namespace: "test-ns",
+			},
+			Spec: arkv1alpha1.QuerySpec{
+				Type: "user",
+			},
+		}
+		err := query.Spec.SetInputString("hello from user")
+		require.NoError(t, err)
+
+		messages, err := GetQueryInputA2AMessages(ctx, query, k8sClient)
+		require.NoError(t, err)
+		require.Len(t, messages, 1)
+		assert.Equal(t, protocol.MessageRoleUser, messages[0].Role)
+		assert.Equal(t, "hello from user", ExtractA2ATextFromMessage(messages[0]))
 	})
 }

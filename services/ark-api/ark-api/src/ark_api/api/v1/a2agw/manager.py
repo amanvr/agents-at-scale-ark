@@ -83,12 +83,16 @@ class ProxyApp:
             self._app = app
 
 
+_REMOVAL_GRACE_SYNCS = 2
+
 class DynamicManager:
     def __init__(self):
         self.agents = {}
         self.executors = {}
+        self.task_stores = {}
+        self._removal_candidates: dict[str, int] = {}
         self.lock = threading.Lock()
-        self.app = ProxyApp()  # Use proxy instead of Starlette
+        self.app = ProxyApp()
         self.registry = get_registry()
         self._refresh_task = None
         self._running = False
@@ -139,22 +143,33 @@ class DynamicManager:
             with self.lock:
                 current_names = set(self.agents.keys())
                 registry_names = set(registry_agents.keys())
-                
-                # Find agents to remove
-                to_remove = current_names - registry_names
+
+                missing_names = current_names - registry_names
+                for name in missing_names:
+                    self._removal_candidates[name] = self._removal_candidates.get(name, 0) + 1
+
+                for name in list(self._removal_candidates):
+                    if name in registry_names:
+                        del self._removal_candidates[name]
+
+                to_remove = {
+                    name for name, count in self._removal_candidates.items()
+                    if count >= _REMOVAL_GRACE_SYNCS
+                }
                 for name in to_remove:
                     del self.agents[name]
+                    self._removal_candidates.pop(name, None)
                     executor = self.executors.pop(name, None)
                     if executor is not None:
                         removed_executors.append(executor)
-                    logger.info(f"Removed agent: {name}")
+                    self.task_stores.pop(name, None)
+                    logger.info("Removed agent after grace period: %s", name)
                     changes_detected = True
-                
-                # Find agents to add or update
+
                 for name, card in registry_agents.items():
                     if name not in self.agents or self.agents[name] != card:
                         self.agents[name] = card
-                        logger.info(f"Added/Updated agent: {name}")
+                        logger.info("Added/Updated agent: %s", name)
                         changes_detected = True
 
             if removed_executors:
@@ -187,6 +202,7 @@ class DynamicManager:
         with self.lock:
             executors = list(self.executors.values())
             self.executors.clear()
+            self.task_stores.clear()
         if executors:
             await asyncio.gather(
                 *(executor.cancel_all_tasks() for executor in executors),
@@ -206,9 +222,13 @@ class DynamicManager:
                 if executor is None:
                     executor = ARKAgentExecutor(name, get_namespace())
                     self.executors[name] = executor
+                task_store = self.task_stores.get(name)
+                if task_store is None:
+                    task_store = InMemoryTaskStore()
+                    self.task_stores[name] = task_store
             request_handler = DefaultRequestHandler(
                 agent_executor=executor,
-                task_store=InMemoryTaskStore(),
+                task_store=task_store,
             )
 
             server = A2AStarletteApplication(

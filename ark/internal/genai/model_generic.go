@@ -36,6 +36,9 @@ func (m *Model) ChatCompletion(ctx context.Context, messages []Message, eventStr
 	if m.Provider == nil {
 		return nil, nil
 	}
+	if IsA2AExperimentalEnabledInContext(ctx) {
+		return nil, fmt.Errorf("openai transport is disabled while A2A experimental mode is enabled")
+	}
 
 	ctx, span := m.telemetryRecorder.StartModelExecution(ctx, m.Model, m.Type)
 	defer span.End()
@@ -47,16 +50,7 @@ func (m *Model) ChatCompletion(ctx context.Context, messages []Message, eventStr
 	ctx = m.eventingRecorder.Start(ctx, "LLMCall", fmt.Sprintf("Calling model %s", m.Model), operationData)
 
 	otelMessages := make([]openai.ChatCompletionMessageParamUnion, 0, len(messages))
-	for i, msg := range messages {
-		converted, err := A2AToOpenAIMessage(msg)
-		if err != nil {
-			convertErr := fmt.Errorf("failed to convert message %d: %w", i, err)
-			m.telemetryRecorder.RecordError(span, convertErr)
-			m.eventingRecorder.Fail(ctx, "LLMCall", convertErr.Error(), convertErr, operationData)
-			return nil, convertErr
-		}
-		otelMessages = append(otelMessages, converted)
-	}
+	otelMessages = append(otelMessages, messages...)
 
 	m.telemetryRecorder.RecordInput(span, otelMessages)
 	m.telemetryRecorder.RecordModelDetails(span, m.Model, m.Type)
@@ -119,8 +113,9 @@ func (m *Model) HealthCheck(ctx context.Context) error {
 	case *BedrockModel:
 		return provider.HealthCheck(ctx)
 	default:
+		healthCtx := WithA2AExperimentalEnabled(ctx, false)
 		testMessages := []Message{NewUserMessage("Hello")}
-		_, err := m.ChatCompletion(ctx, testMessages, nil, 1)
+		_, err := m.ChatCompletion(healthCtx, testMessages, nil, 1)
 		return err
 	}
 }

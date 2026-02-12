@@ -1,15 +1,18 @@
 import asyncio
 import logging
+import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Any, TypeGuard
 
 from ark_sdk.client import V1_ALPHA1, with_ark_client
 from ark_sdk.models.query_v1alpha1 import QueryV1alpha1
 from ark_sdk.models.query_v1alpha1_spec import QueryV1alpha1Spec
 from ark_sdk.models.query_v1alpha1_spec_target import QueryV1alpha1SpecTarget
-from ark_api.constants.annotations import A2A_CONTEXT_ID_ANNOTATION
+from ark_api.constants.annotations import (
+    A2A_CONTEXT_ID_ANNOTATION,
+    A2A_EXPERIMENTAL_ENABLED_ANNOTATION,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +50,7 @@ async def post_query(
     query_type: str = "user",
     timeout: int = 60,
     context_id: str | None = None,
+    experimental_enabled: bool = False,
 ) -> str:
     """
     Post a query to ARK and return the query name.
@@ -73,10 +77,15 @@ async def post_query(
         )
 
         # Create query object
-        query_name = f"a2agw-query-{uuid.uuid4().hex[:8]}"
+        query_name = f"a2agw-query-{uuid.uuid4().hex[:12]}"
         metadata: dict[str, Any] = {"name": query_name, "namespace": namespace}
+        annotations: dict[str, str] = {}
         if context_id:
-            metadata["annotations"] = {A2A_CONTEXT_ID_ANNOTATION: context_id}
+            annotations[A2A_CONTEXT_ID_ANNOTATION] = context_id
+        if experimental_enabled:
+            annotations[A2A_EXPERIMENTAL_ENABLED_ANNOTATION] = "true"
+        if annotations:
+            metadata["annotations"] = annotations
         query_obj = QueryV1alpha1(
             api_version="ark.mckinsey.com/v1alpha1",
             kind="Query",
@@ -106,8 +115,8 @@ async def wait_for_query(namespace: str, query_name: str, timeout: int = 60) -> 
     async with with_ark_client(namespace, V1_ALPHA1) as ark_client:
         try:
             # Poll for completion
-            start_time = datetime.now()
-            while (datetime.now() - start_time).total_seconds() < timeout:
+            start_time = time.monotonic()
+            while time.monotonic() - start_time < timeout:
                 # Get latest status
                 query_status = await ark_client.queries.a_get(query_name)
 
@@ -148,6 +157,7 @@ async def post_query_and_wait(
     query_type: str = "user",
     timeout: int = 60,
     context_id: str | None = None,
+    experimental_enabled: bool = False,
 ) -> QueryExecutionResult:
     """
     Post a query to ARK and wait for the result.
@@ -172,5 +182,6 @@ async def post_query_and_wait(
         query_type=query_type,
         timeout=timeout,
         context_id=context_id,
+        experimental_enabled=experimental_enabled,
     )
     return await wait_for_query(namespace, query_name, timeout)
