@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"strconv"
 	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -108,13 +110,26 @@ type ExecutionEngineClient struct {
 	eventingRecorder eventing.ExecutionEngineRecorder
 }
 
+// getExecutorTimeout reads ARK_EXECUTOR_HTTP_TIMEOUT_SECONDS env var or returns default
+func getExecutorTimeout() time.Duration {
+	if timeoutStr := os.Getenv("ARK_EXECUTOR_HTTP_TIMEOUT_SECONDS"); timeoutStr != "" {
+		if timeout, err := strconv.Atoi(timeoutStr); err == nil && timeout > 0 {
+			return time.Duration(timeout) * time.Second
+		}
+	}
+	return 300 * time.Second // 5 minutes default
+}
+
 // NewExecutionEngineClient creates a new ExecutionEngine client
 func NewExecutionEngineClient(k8sClient client.Client, eventingRecorder eventing.ExecutionEngineRecorder) *ExecutionEngineClient {
+	timeout := getExecutorTimeout()
+	logf.Log.Info("Configured executor HTTP timeout", "timeout", timeout.String())
+
 	return &ExecutionEngineClient{
 		client:           k8sClient,
 		eventingRecorder: eventingRecorder,
 		httpClient: &http.Client{
-			Timeout: 300 * time.Second, // 5 minutes timeout for agent execution
+			Timeout: timeout,
 		},
 	}
 }

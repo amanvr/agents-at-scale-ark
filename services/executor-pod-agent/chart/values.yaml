@@ -1,0 +1,31 @@
+replicaCount: 1
+
+image:
+  repository: executor-pod-agent
+  pullPolicy: IfNotPresent
+  tag: "latest"
+
+serviceAccount:
+  create: true
+  name: executor-pod-agent
+
+rbac:
+  create: true
+
+service:
+  type: ClusterIP
+  port: 8000
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+env:
+  - name: HOST
+    value: "0.0.0.0"
+  - name: PORT
+    value: "8000"

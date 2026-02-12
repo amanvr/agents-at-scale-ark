@@ -1,0 +1,42 @@
+version: v2beta1
+name: executor-pod-agent
+
+vars:
+  REGISTRY:
+    source: env
+    default: localhost:32676
+  TAG:
+    command: git
+    args: [rev-parse, --short, HEAD]
+
+images:
+  executor-pod-agent:
+    image: ${REGISTRY}/executor-pod-agent
+    dockerfile: ./Dockerfile
+    context: ../../
+    tags:
+      - ${TAG}
+      - latest
+    buildKit:
+      args:
+        - --platform=linux/amd64
+    rebuildStrategy: always
+
+deployments:
+  executor-pod-agent:
+    helm:
+      releaseName: executor-pod-agent
+      chart:
+        name: ./chart
+      values:
+        image:
+          repository: ${REGISTRY}/executor-pod-agent
+          tag: "${TAG}"
+          pullPolicy: IfNotPresent
+
+dev:
+  executor-pod-agent:
+    labelSelector:
+      app.kubernetes.io/name: executor-pod-agent
+    ports:
+      - port: "8000:8000"

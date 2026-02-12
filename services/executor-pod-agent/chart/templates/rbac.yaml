@@ -1,0 +1,36 @@
+{{- if .Values.rbac.create -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "executor-pod-agent.fullname" . }}
+  labels:
+    {{- include "executor-pod-agent.labels" . | nindent 4 }}
+rules:
+  # Allow creating and managing jobs
+  - apiGroups: ["batch"]
+    resources: ["jobs", "jobs/status"]
+    verbs: ["create", "get", "list", "watch", "delete", "patch"]
+  # Allow reading pod logs and status
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "pods/status"]
+    verbs: ["get", "list", "watch"]
+  # Allow reading secrets for API keys
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "executor-pod-agent.fullname" . }}
+  labels:
+    {{- include "executor-pod-agent.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "executor-pod-agent.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "executor-pod-agent.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

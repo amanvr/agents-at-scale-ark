@@ -1,0 +1,6 @@
+apiVersion: v2
+name: executor-pod-agent
+description: Pod-based agent executor service for ARK
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
