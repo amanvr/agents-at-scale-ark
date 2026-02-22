@@ -36,9 +36,9 @@ type ExecutionEngineRequest struct {
 	// Current message to process
 	UserInput *ExecutionEngineMessage `json:"userInput,omitempty"`
 	// Conversation history
-	History []ExecutionEngineMessage `json:"history,omitempty"`
+	History []ExecutionEngineMessage `json:"history"`
 	// Available tools
-	Tools []ToolDefinition `json:"tools,omitempty"`
+	Tools []ToolDefinition `json:"tools"`
 	// Payload mode indicates compat or native request format
 	PayloadMode string `json:"payloadMode,omitempty"`
 	// Native A2A user input
@@ -55,6 +55,7 @@ type AgentConfig struct {
 	Description  string                `json:"description"`
 	Parameters   []Parameter           `json:"parameters,omitempty"`
 	Model        ExecutionEngineModel  `json:"model"`
+	Labels       map[string]string     `json:"labels"`
 	OutputSchema *runtime.RawExtension `json:"outputSchema,omitempty"`
 }
 
@@ -195,6 +196,9 @@ func (c *ExecutionEngineClient) Execute(ctx context.Context, engineRef *arkv1alp
 		c.eventingRecorder.Fail(ctx, "ExecutionEngine", fmt.Sprintf("Failed to marshal request: %v", err), err, operationData)
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
+
+	// Log request body for debugging
+	logf.Log.Info("=== EXECUTION ENGINE REQUEST ===", "url", engineAddress+"/execute", "agent", agentConfig.Name, "requestBody", string(requestBody))
 
 	executeURL, err := resolveExecutionEngineURL(engineAddress, "/execute")
 	if err != nil {
@@ -412,6 +416,7 @@ func buildAgentConfig(agent *Agent) (AgentConfig, error) {
 		Description:  agent.Description,
 		Parameters:   parameters,
 		Model:        model,
+		Labels:       make(map[string]string),
 		OutputSchema: agent.OutputSchema,
 	}, nil
 }

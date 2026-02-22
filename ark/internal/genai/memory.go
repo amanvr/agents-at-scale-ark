@@ -60,18 +60,18 @@ type MessagesRequest struct {
 }
 
 type MessageRecord struct {
-	ID             int64           `json:"id"`
+	Sequence       int64           `json:"sequence"`        // ark-broker uses "sequence", not "id"
 	ConversationID string          `json:"conversation_id"`
 	QueryID        string          `json:"query_id"`
 	Message        json.RawMessage `json:"message"`
-	CreatedAt      string          `json:"created_at"`
+	Timestamp      string          `json:"timestamp"`       // ark-broker uses "timestamp", not "created_at"
 }
 
 type MessagesResponse struct {
-	Messages []MessageRecord `json:"messages"`
-	Total    int             `json:"total"`
-	Limit    int             `json:"limit"`
-	Offset   int             `json:"offset"`
+	Items []MessageRecord `json:"items"` // ark-broker returns "items", not "messages"
+	Total int             `json:"total"`
+	Limit int             `json:"limit"`
+	Offset int            `json:"offset"`
 }
 
 func DefaultConfig() Config {
@@ -102,6 +102,8 @@ func NewMemoryForQuery(ctx context.Context, k8sClient client.Client, memoryRef *
 		_, err := getMemoryResource(ctx, k8sClient, "default", namespace)
 		if err != nil {
 			// If default memory doesn't exist, use noop memory
+			logf.FromContext(ctx).Info("Default memory not found or failed to load - using noop memory",
+				"namespace", namespace, "error", err.Error())
 			return NewNoopMemory(), nil
 		}
 		memoryName, memoryNamespace = "default", namespace //nolint:goconst // "default" here is memory name, not model

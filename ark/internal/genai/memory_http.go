@@ -383,11 +383,11 @@ func (m *HTTPMemory) fetchMessageRecords(ctx context.Context) ([]MessageRecord, 
 	}
 
 	operationData := map[string]string{
-		"messages": fmt.Sprintf("%d", len(response.Messages)),
+		"messages": fmt.Sprintf("%d", len(response.Items)),
 		"result":   "Memory get messages completed successfully",
 	}
 	m.eventingRecorder.Complete(ctx, "MemoryGetMessages", operationData["result"], operationData)
-	return response.Messages, nil
+	return response.Items, nil
 }
 
 // GetConversationID returns the current conversation ID

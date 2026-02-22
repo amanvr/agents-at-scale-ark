@@ -6,15 +6,15 @@ WORKDIR /app
 RUN pip install --no-cache-dir uv
 
 # Copy ARK SDK wheel from build context (devspace sets context to repo root)
-COPY out/ark-sdk/py-sdk/dist/ark_sdk-0.1.52-py3-none-any.whl /tmp/ark_sdk-0.1.52-py3-none-any.whl
+COPY out/ark-sdk/py-sdk/dist/ark_sdk-0.1.53-py3-none-any.whl /tmp/ark_sdk-0.1.53-py3-none-any.whl
 
 # Copy service files
 COPY services/executor-pod-agent/pyproject.toml ./
 COPY services/executor-pod-agent/README.md ./
 COPY services/executor-pod-agent/src/ ./src/
 
-# Update pyproject.toml to use local wheel
-RUN sed -i 's|path = "../../out/ark-sdk/py-sdk/dist/ark_sdk-0.1.52-py3-none-any.whl"|path = "/tmp/ark_sdk-0.1.52-py3-none-any.whl"|' pyproject.toml
+# Update pyproject.toml to use local wheel (update both version and path)
+RUN sed -i 's|path = "../../out/ark-sdk/py-sdk/dist/ark_sdk-0.1.52-py3-none-any.whl"|path = "/tmp/ark_sdk-0.1.53-py3-none-any.whl"|' pyproject.toml
 
 # Install dependencies using uv
 RUN uv pip install --system --no-cache -e .

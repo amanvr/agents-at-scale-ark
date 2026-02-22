@@ -64,6 +64,7 @@ type QueryReconciler struct {
 
 func (r *QueryReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
+	log.Info("=== Reconcile called ===", "query", req.Name, "namespace", req.Namespace)
 
 	obj, err := r.fetchQuery(ctx, req.NamespacedName)
 	if err != nil {
@@ -72,13 +73,18 @@ func (r *QueryReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
+	log.Info("Query fetched", "query", obj.Name, "phase", obj.Status.Phase, "conditionCount", len(obj.Status.Conditions))
 
-	expiry := obj.CreationTimestamp.Add(obj.Spec.TTL.Duration)
-	if time.Now().After(expiry) {
-		// TTL expired: delete the object
-		if err := r.Delete(ctx, &obj); err != nil {
-			log.Error(err, "unable to delete object")
-			return ctrl.Result{}, err
+	// Check TTL expiry if TTL is set.
+	// TTL may be nil when using aggregated API server (non-CRD storage)
+	// because the field is omitempty and may not be initialized.
+	if obj.Spec.TTL != nil {
+		expiry := obj.CreationTimestamp.Add(obj.Spec.TTL.Duration)
+		if time.Now().After(expiry) {
+			if err := r.Delete(ctx, &obj); err != nil {
+				log.Error(err, "unable to delete object")
+				return ctrl.Result{}, err
+			}
 		}
 	}
 
@@ -119,7 +125,13 @@ func (r *QueryReconciler) handleFinalizer(ctx context.Context, obj *arkv1alpha1.
 }
 
 func (r *QueryReconciler) handleQueryExecution(ctx context.Context, req ctrl.Request, obj arkv1alpha1.Query) (ctrl.Result, error) {
-	expiry := obj.CreationTimestamp.Add(obj.Spec.TTL.Duration)
+	// Calculate expiry time for requeue. Use 1 hour default if TTL is not set.
+	// TTL may be nil when using aggregated API server (non-CRD storage).
+	ttl := time.Hour
+	if obj.Spec.TTL != nil {
+		ttl = obj.Spec.TTL.Duration
+	}
+	expiry := obj.CreationTimestamp.Add(ttl)
 
 	if obj.Spec.Cancel && obj.Status.Phase != statusCanceled {
 		r.cleanupExistingOperation(req.NamespacedName)
@@ -150,21 +162,28 @@ func (r *QueryReconciler) handleQueryExecution(ctx context.Context, req ctrl.Req
 
 func (r *QueryReconciler) handleRunningPhase(ctx context.Context, req ctrl.Request, obj arkv1alpha1.Query) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
+	log.Info("=== handleRunningPhase called ===", "query", obj.Name)
 
 	if _, exists := r.operations.Load(req.NamespacedName); exists {
-		log.Info("Exists")
+		log.Info("Operation already exists in map", "query", obj.Name)
 		return ctrl.Result{}, nil
 	}
 
+	log.Info("Starting new operation", "query", obj.Name)
 	opCtx, cancel := context.WithCancel(ctx)
 	r.operations.Store(req.NamespacedName, cancel)
 
+	log.Info("Launching executeQueryAsync goroutine", "query", obj.Name)
 	go r.executeQueryAsync(opCtx, obj, req.NamespacedName)
+	log.Info("Goroutine launched", "query", obj.Name)
 	return ctrl.Result{}, nil
 }
 
 func (r *QueryReconciler) executeQueryAsync(opCtx context.Context, obj arkv1alpha1.Query, namespacedName types.NamespacedName) {
+	// Get logger FIRST before anything else
 	log := logf.FromContext(opCtx)
+	log.Info("### executeQueryAsync ENTERED ###", "query", obj.Name)
+
 	cleanupCache := true
 	startTime := time.Now()
 
@@ -172,27 +191,42 @@ func (r *QueryReconciler) executeQueryAsync(opCtx context.Context, obj arkv1alph
 		if r := recover(); r != nil {
 			log.Error(fmt.Errorf("query execution goroutine panic: %v", r), "Query execution goroutine panicked")
 		}
+		log.Info("### executeQueryAsync defer cleanup ###", "query", obj.Name)
 		if cleanupCache {
 			r.operations.Delete(namespacedName)
 		}
 	}()
 
+	log.Info("### After defer setup ###", "query", obj.Name)
+
+	log.Info("### Setting sessionId ###", "query", obj.Name)
 	sessionId := obj.Spec.SessionId
 	if sessionId == "" {
 		sessionId = string(obj.UID)
 	}
+	log.Info("### SessionId set ###", "query", obj.Name, "sessionId", sessionId)
 
 	conversationId := obj.Spec.ConversationId
+	log.Info("### ConversationId retrieved ###", "query", obj.Name)
 
+	log.Info("### Calling StartQuery ###", "query", obj.Name)
 	opCtx, span := r.Telemetry.QueryRecorder().StartQuery(opCtx, &obj, "execute")
-	r.Telemetry.QueryRecorder().RecordSessionID(span, sessionId)
-	defer span.End()
+	log.Info("### StartQuery completed ###", "query", obj.Name)
 
+	r.Telemetry.QueryRecorder().RecordSessionID(span, sessionId)
+	log.Info("### RecordSessionID completed ###", "query", obj.Name)
+
+	defer span.End()
+	log.Info("### span.End defer registered ###", "query", obj.Name)
+
+	log.Info("### Calling setupQueryExecution ###", "query", obj.Name)
 	impersonatedClient, memory, err := r.setupQueryExecution(opCtx, obj, conversationId)
 	if err != nil {
+		log.Error(err, "### setupQueryExecution FAILED ###", "query", obj.Name)
 		r.Telemetry.QueryRecorder().RecordError(span, err)
 		return
 	}
+	log.Info("### setupQueryExecution completed ###", "query", obj.Name)
 
 	// Get conversation ID from memory if attached
 	if memory != nil {
@@ -212,28 +246,42 @@ func (r *QueryReconciler) executeQueryAsync(opCtx context.Context, obj arkv1alph
 	opCtx = r.Eventing.QueryRecorder().StartTokenCollection(opCtx)
 	opCtx = r.Eventing.QueryRecorder().Start(opCtx, "QueryExecution", fmt.Sprintf("Executing query %s", obj.Name), nil)
 
-	if genai.IsA2AExperimentalEnabled(obj.Annotations) {
+	a2aEnabled := genai.IsA2AExperimentalEnabled(obj.Annotations)
+	log.Info("A2A experimental mode check", "enabled", a2aEnabled, "query", obj.Name)
+
+	if a2aEnabled {
+		log.Info("Retrieving A2A input messages", "query", obj.Name)
 		inputMessages, err := genai.GetQueryInputA2AMessages(opCtx, obj, impersonatedClient)
-		if err == nil {
+		if err != nil {
+			log.Error(err, "Failed to get A2A input messages", "query", obj.Name)
+		} else {
+			log.Info("Successfully retrieved A2A input messages", "query", obj.Name, "messageCount", len(inputMessages))
 			queryInput := genai.ExtractA2AUserMessageContent(inputMessages)
 			r.Telemetry.QueryRecorder().RecordRootInput(span, queryInput)
 		}
 	} else {
+		log.Info("Retrieving OpenAI input messages", "query", obj.Name)
 		inputMessages, err := genai.GetQueryInputMessages(opCtx, obj, impersonatedClient)
-		if err == nil {
+		if err != nil {
+			log.Error(err, "Failed to get OpenAI input messages", "query", obj.Name)
+		} else {
+			log.Info("Successfully retrieved OpenAI input messages", "query", obj.Name, "messageCount", len(inputMessages))
 			queryInput := genai.ExtractUserMessageContent(inputMessages)
 			r.Telemetry.QueryRecorder().RecordRootInput(span, queryInput)
 		}
 	}
 
+	log.Info("Starting reconcileQueue", "query", obj.Name)
 	response, eventStream, payloadMode, err := r.reconcileQueue(opCtx, obj, impersonatedClient, memory)
 	if err != nil {
+		log.Error(err, "reconcileQueue failed", "query", obj.Name)
 		genai.StreamError(opCtx, eventStream, err, "query_execution_failed", "query")
 		r.Telemetry.QueryRecorder().RecordError(span, err)
 		r.Eventing.QueryRecorder().Fail(opCtx, "QueryExecution", fmt.Sprintf("Query execution failed: %v", err), err, nil)
 		_ = r.updateStatus(opCtx, &obj, statusError)
 		return
 	}
+	log.Info("reconcileQueue completed successfully", "query", obj.Name, "payloadMode", payloadMode)
 
 	obj.Status.Response = response
 
@@ -399,18 +447,27 @@ func (r *QueryReconciler) resolveSelector(ctx context.Context, selector *metav1.
 }
 
 func (r *QueryReconciler) reconcileQueue(ctx context.Context, query arkv1alpha1.Query, impersonatedClient client.Client, memory genai.MemoryInterface) (*arkv1alpha1.Response, genai.EventStreamInterface, string, error) {
+	log := logf.FromContext(ctx)
 	payloadMode := genai.A2APayloadModeCompat
+
+	log.Info("Creating event stream if needed", "query", query.Name)
 	eventStream, err := r.createEventStreamIfNeeded(ctx, query)
 	if err != nil {
+		log.Error(err, "Failed to create event stream", "query", query.Name)
 		return nil, nil, payloadMode, err
 	}
 
+	log.Info("Resolving target", "query", query.Name)
 	target, err := r.resolveTarget(ctx, query, impersonatedClient)
 	if err != nil {
+		log.Error(err, "Failed to resolve target", "query", query.Name)
 		return nil, nil, payloadMode, fmt.Errorf("failed to resolve target: %w", err)
 	}
+	log.Info("Target resolved", "query", query.Name, "targetType", target.Type, "targetName", target.Name)
 
+	log.Info("Executing target", "query", query.Name, "targetType", target.Type, "targetName", target.Name)
 	response, payloadMode := r.executeTarget(ctx, query, *target, impersonatedClient, memory, eventStream)
+	log.Info("Target execution completed", "query", query.Name, "payloadMode", payloadMode)
 	return response, eventStream, payloadMode, nil
 }
 
@@ -439,13 +496,19 @@ func (r *QueryReconciler) createEventStreamIfNeeded(ctx context.Context, query a
 }
 
 func (r *QueryReconciler) executeTarget(ctx context.Context, query arkv1alpha1.Query, target arkv1alpha1.QueryTarget, impersonatedClient client.Client, memory genai.MemoryInterface, eventStream genai.EventStreamInterface) (*arkv1alpha1.Response, string) {
+	log := logf.FromContext(ctx)
+	log.Info("Performing target execution", "query", query.Name, "targetType", target.Type, "targetName", target.Name)
+
 	executionResult, payloadMode, err := r.performTargetExecution(ctx, query, target, impersonatedClient, memory, eventStream)
 	if err != nil {
+		log.Error(err, "performTargetExecution failed", "query", query.Name, "targetType", target.Type, "targetName", target.Name)
 		errResponse := r.createErrorResponse(target, err)
 		return &errResponse, payloadMode
 	}
+	log.Info("performTargetExecution completed", "query", query.Name, "payloadMode", payloadMode)
 
 	if executionResult == nil || (len(executionResult.Messages) == 0 && len(executionResult.A2AMessages) == 0) {
+		log.Info("executionResult is empty", "query", query.Name, "resultNil", executionResult == nil)
 		return nil, payloadMode
 	}
 	hydrateDelegatedA2AData(ctx, executionResult)
@@ -453,6 +516,7 @@ func (r *QueryReconciler) executeTarget(ctx context.Context, query arkv1alpha1.Q
 	response := r.createSuccessResponse(target, executionResult.Messages, executionResult.A2AMessages, executionResult.A2APayloadMode)
 	applyA2AMetadataFromExecutionResult(&response, executionResult)
 
+	log.Info("Target execution response created", "query", query.Name, "responsePhase", response.Phase)
 	return &response, payloadMode
 }
 
@@ -773,11 +837,16 @@ func (r *QueryReconciler) performTargetExecution(ctx context.Context, query arkv
 }
 
 func (r *QueryReconciler) dispatchAgent(ctx context.Context, query arkv1alpha1.Query, agentName string, impersonatedClient client.Client, memory genai.MemoryInterface, eventStream genai.EventStreamInterface, span telemetry.Span) (*genai.ExecutionResult, string, error) {
+	log := logf.FromContext(ctx)
+	log.Info("dispatchAgent called", "agent", agentName, "query", query.Name)
+
 	var agentCRD arkv1alpha1.Agent
 	agentKey := types.NamespacedName{Name: agentName, Namespace: query.Namespace}
 	if err := impersonatedClient.Get(ctx, agentKey, &agentCRD); err != nil {
+		log.Error(err, "Failed to get agent CRD", "agent", agentName, "query", query.Name)
 		return nil, genai.A2APayloadModeCompat, fmt.Errorf("unable to get %v, error:%w", agentKey, err)
 	}
+	log.Info("Agent CRD retrieved", "agent", agentName, "query", query.Name)
 
 	agentAnnotations := []map[string]string(nil)
 	if shouldIncludeAgentAnnotationsForA2A(agentCRD.Annotations) {
@@ -788,16 +857,29 @@ func (r *QueryReconciler) dispatchAgent(ctx context.Context, query arkv1alpha1.Q
 	if useA2A {
 		payloadMode = genai.A2APayloadModeNative
 	}
+	log.Info("A2A mode resolved for agent", "agent", agentName, "useA2A", useA2A, "payloadMode", payloadMode)
 
 	ctx = genai.WithExecutionMetadata(ctx, map[string]interface{}{
 		"agent": agentName,
 	})
 
 	if useA2A {
+		log.Info("Executing agent with A2A", "agent", agentName, "query", query.Name)
 		result, err := r.executeAgentA2A(ctx, query, &agentCRD, impersonatedClient, memory, eventStream, span)
+		if err != nil {
+			log.Error(err, "executeAgentA2A failed", "agent", agentName, "query", query.Name)
+		} else {
+			log.Info("executeAgentA2A completed", "agent", agentName, "query", query.Name)
+		}
 		return result, payloadMode, err
 	}
+	log.Info("Executing agent without A2A", "agent", agentName, "query", query.Name)
 	result, err := r.executeAgent(ctx, query, &agentCRD, impersonatedClient, memory, eventStream, span)
+	if err != nil {
+		log.Error(err, "executeAgent failed", "agent", agentName, "query", query.Name)
+	} else {
+		log.Info("executeAgent completed", "agent", agentName, "query", query.Name)
+	}
 	return result, payloadMode, err
 }
 
@@ -838,74 +920,117 @@ func (r *QueryReconciler) dispatchTeam(ctx context.Context, query arkv1alpha1.Qu
 }
 
 func (r *QueryReconciler) executeAgent(ctx context.Context, query arkv1alpha1.Query, agentCRD *arkv1alpha1.Agent, impersonatedClient client.Client, memory genai.MemoryInterface, eventStream genai.EventStreamInterface, span telemetry.Span) (*genai.ExecutionResult, error) {
+	log := logf.FromContext(ctx)
+	log.Info("executeAgent called (non-A2A)", "agent", agentCRD.Name, "query", query.Name)
+
+	log.Info("Getting OpenAI input messages", "agent", agentCRD.Name, "query", query.Name)
 	inputMessages, err := genai.GetQueryInputMessages(ctx, query, impersonatedClient)
 	if err != nil {
+		log.Error(err, "Failed to get input messages in executeAgent", "agent", agentCRD.Name, "query", query.Name)
 		return nil, err
 	}
+	log.Info("Retrieved input messages", "agent", agentCRD.Name, "query", query.Name, "messageCount", len(inputMessages))
 	r.Telemetry.QueryRecorder().RecordInput(span, genai.ExtractUserMessageContent(inputMessages))
 
+	log.Info("Making agent", "agent", agentCRD.Name, "query", query.Name)
 	agent, err := genai.MakeAgent(ctx, impersonatedClient, agentCRD, r.Telemetry, r.Eventing)
 	if err != nil {
+		log.Error(err, "Failed to make agent", "agent", agentCRD.Name, "query", query.Name)
 		return nil, fmt.Errorf("unable to make agent %s/%s: %w", agentCRD.Namespace, agentCRD.Name, err)
 	}
+	log.Info("Agent created", "agent", agentCRD.Name, "query", query.Name)
 
 	ctx = genai.WithA2AExperimentalEnabled(ctx, false)
 	ctx = genai.WithA2APayloadMode(ctx, genai.A2APayloadModeCompat)
+	log.Info("Set non-A2A context flags", "agent", agentCRD.Name, "query", query.Name)
 
+	log.Info("Loading initial messages from memory", "agent", agentCRD.Name, "query", query.Name)
 	memoryMessages, err := r.loadInitialMessages(ctx, memory)
 	if err != nil {
+		log.Error(err, "Failed to load initial messages", "agent", agentCRD.Name, "query", query.Name)
 		return nil, fmt.Errorf("unable to load initial messages: %w", err)
 	}
+	log.Info("Loaded initial messages", "agent", agentCRD.Name, "query", query.Name, "memoryMessageCount", len(memoryMessages))
 
+	log.Info("Preparing execution messages", "agent", agentCRD.Name, "query", query.Name)
 	currentMessage, contextMessages := genai.PrepareExecutionMessages(inputMessages, memoryMessages)
+	log.Info("Prepared execution messages", "agent", agentCRD.Name, "query", query.Name, "contextMessageCount", len(contextMessages))
 
+	log.Info("Calling agent.Execute", "agent", agentCRD.Name, "query", query.Name)
 	result, err := agent.Execute(ctx, currentMessage, contextMessages, memory, eventStream)
 	if err != nil {
+		log.Error(err, "agent.Execute failed", "agent", agentCRD.Name, "query", query.Name)
 		return nil, err
 	}
+	log.Info("agent.Execute completed", "agent", agentCRD.Name, "query", query.Name, "resultMessageCount", len(result.Messages))
 
 	result.A2APayloadMode = genai.A2APayloadModeCompat
 
+	log.Info("Saving new messages to memory", "agent", agentCRD.Name, "query", query.Name)
 	newMessages := genai.PrepareNewMessagesForMemory(inputMessages, result.Messages)
 	if err := memory.AddMessages(ctx, query.Name, newMessages); err != nil {
+		log.Error(err, "Failed to save messages to memory", "agent", agentCRD.Name, "query", query.Name)
 		return nil, fmt.Errorf("failed to save new messages to memory: %w", err)
 	}
+	log.Info("Saved messages to memory", "agent", agentCRD.Name, "query", query.Name)
 
 	return result, nil
 }
 
 func (r *QueryReconciler) executeAgentA2A(ctx context.Context, query arkv1alpha1.Query, agentCRD *arkv1alpha1.Agent, impersonatedClient client.Client, memory genai.MemoryInterface, eventStream genai.EventStreamInterface, span telemetry.Span) (*genai.ExecutionResult, error) {
+	log := logf.FromContext(ctx)
+	log.Info("executeAgentA2A called", "agent", agentCRD.Name, "query", query.Name)
+
+	log.Info("Getting A2A input messages", "agent", agentCRD.Name, "query", query.Name)
 	inputMessages, err := genai.GetQueryInputA2AMessages(ctx, query, impersonatedClient)
 	if err != nil {
+		log.Error(err, "Failed to get A2A input messages in executeAgentA2A", "agent", agentCRD.Name, "query", query.Name)
 		return nil, err
 	}
+	log.Info("Retrieved A2A input messages", "agent", agentCRD.Name, "query", query.Name, "messageCount", len(inputMessages))
 	r.Telemetry.QueryRecorder().RecordInput(span, genai.ExtractA2AUserMessageContent(inputMessages))
 
 	ctx = genai.WithA2AExperimentalEnabled(ctx, true)
 	ctx = genai.WithA2APayloadMode(ctx, genai.A2APayloadModeNative)
+	log.Info("Set A2A context flags", "agent", agentCRD.Name, "query", query.Name)
 
+	log.Info("Making agent", "agent", agentCRD.Name, "query", query.Name)
 	agent, err := genai.MakeAgent(ctx, impersonatedClient, agentCRD, r.Telemetry, r.Eventing)
 	if err != nil {
+		log.Error(err, "Failed to make agent", "agent", agentCRD.Name, "query", query.Name)
 		return nil, fmt.Errorf("unable to make agent %s/%s: %w", agentCRD.Namespace, agentCRD.Name, err)
 	}
+	log.Info("Agent created", "agent", agentCRD.Name, "query", query.Name)
 
+	log.Info("Loading initial A2A messages from memory", "agent", agentCRD.Name, "query", query.Name)
 	memoryMessages, err := r.loadInitialA2AMessages(ctx, memory)
 	if err != nil {
+		log.Error(err, "Failed to load initial A2A messages", "agent", agentCRD.Name, "query", query.Name)
 		return nil, fmt.Errorf("unable to load initial messages: %w", err)
 	}
+	log.Info("Loaded initial A2A messages", "agent", agentCRD.Name, "query", query.Name, "memoryMessageCount", len(memoryMessages))
 
+	log.Info("Preparing A2A execution messages", "agent", agentCRD.Name, "query", query.Name)
 	currentMessage, contextMessages := genai.PrepareA2AExecutionMessages(inputMessages, memoryMessages)
+	log.Info("Prepared A2A execution messages", "agent", agentCRD.Name, "query", query.Name, "contextMessageCount", len(contextMessages))
+
+	log.Info("Calling agent.ExecuteA2A", "agent", agentCRD.Name, "query", query.Name)
 	result, err := agent.ExecuteA2A(ctx, currentMessage, contextMessages, memory, eventStream)
 	if err != nil {
+		log.Error(err, "agent.ExecuteA2A failed", "agent", agentCRD.Name, "query", query.Name)
 		return nil, err
 	}
+	log.Info("agent.ExecuteA2A completed", "agent", agentCRD.Name, "query", query.Name, "resultMessageCount", len(result.A2AMessages))
 
 	result.A2APayloadMode = genai.A2APayloadModeNative
 
+	log.Info("Saving new messages to memory", "agent", agentCRD.Name, "query", query.Name)
 	newMessages := genai.PrepareA2ANewMessagesForMemory(inputMessages, result.A2AMessages)
 	if err := memory.AddA2AMessages(ctx, query.Name, newMessages); err != nil {
+		log.Error(err, "Failed to save A2A messages to memory", "agent", agentCRD.Name, "query", query.Name)
 		return nil, fmt.Errorf("failed to save new messages to memory: %w", err)
 	}
+	log.Info("Saved A2A messages to memory", "agent", agentCRD.Name, "query", query.Name)
 
 	return result, nil
 }

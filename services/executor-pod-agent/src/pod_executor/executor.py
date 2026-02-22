@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import os
 from typing import List, Dict, Any
 from kubernetes_asyncio import client
 from kubernetes_asyncio.client.api_client import ApiClient
@@ -21,7 +22,17 @@ class PodAgentExecutor(BaseExecutor):
         super().__init__("PodAgent")
         self.namespace = get_namespace()
         self.job_timeout = 1800  # 30 minutes default timeout
+
+        # Read workspace PVC configuration from environment
+        self.workspace_pvc_name = os.getenv("WORKSPACE_PVC_NAME")
+        self.workspace_mount_path = os.getenv("WORKSPACE_MOUNT_PATH", "/workspace")
+        self.workspace_sub_path = os.getenv("WORKSPACE_SUB_PATH", "workspaces")
+
         logger.info(f"PodAgentExecutor initialized for namespace: {self.namespace}")
+        if self.workspace_pvc_name:
+            logger.info(f"Workspace PVC: {self.workspace_pvc_name} mounted at {self.workspace_mount_path} (subPath: {self.workspace_sub_path})")
+        else:
+            logger.warning("No WORKSPACE_PVC_NAME configured - files will be ephemeral")
 
     async def execute_agent(self, request: ExecutionEngineRequest) -> List[Message]:
         """Execute agent by spawning a Kubernetes Job."""
@@ -146,6 +157,18 @@ class PodAgentExecutor(BaseExecutor):
                 )
             )
 
+        # Add volume mounts if PVC is configured
+        volume_mounts = []
+        if self.workspace_pvc_name:
+            volume_mounts.append(
+                client.V1VolumeMount(
+                    name="workspace-data",
+                    mount_path=self.workspace_mount_path,
+                    sub_path=self.workspace_sub_path,
+                )
+            )
+            logger.info(f"Added volume mount: {self.workspace_mount_path} (subPath: {self.workspace_sub_path})")
+
         # Define pod template
         container = client.V1Container(
             name="agent",
@@ -153,6 +176,7 @@ class PodAgentExecutor(BaseExecutor):
             image_pull_policy="IfNotPresent",
             command=["bun", "run", "dist/entrypoint.js"],
             env=env_vars,
+            volume_mounts=volume_mounts if volume_mounts else None,
             resources=client.V1ResourceRequirements(
                 requests={"memory": "512Mi", "cpu": "500m"},
                 limits={"memory": "2Gi", "cpu": "2000m"},
@@ -164,6 +188,35 @@ class PodAgentExecutor(BaseExecutor):
             ),
         )
 
+        # Add volumes if PVC is configured
+        volumes = []
+        if self.workspace_pvc_name:
+            volumes.append(
+                client.V1Volume(
+                    name="workspace-data",
+                    persistent_volume_claim=client.V1PersistentVolumeClaimVolumeSource(
+                        claim_name=self.workspace_pvc_name
+                    ),
+                )
+            )
+            logger.info(f"Added volume: workspace-data from PVC {self.workspace_pvc_name}")
+
+        # Add pod affinity to co-locate with filesystem-rapp (for RWO PVC access)
+        affinity = None
+        if self.workspace_pvc_name:
+            affinity = client.V1Affinity(
+                pod_affinity=client.V1PodAffinity(
+                    required_during_scheduling_ignored_during_execution=[
+                        client.V1PodAffinityTerm(
+                            label_selector=client.V1LabelSelector(
+                                match_labels={"app": "filesystem-rapp"}
+                            ),
+                            topology_key="kubernetes.io/hostname"
+                        )
+                    ]
+                )
+            )
+
         # Pod template spec
         pod_template = client.V1PodTemplateSpec(
             metadata=client.V1ObjectMeta(
@@ -172,7 +225,9 @@ class PodAgentExecutor(BaseExecutor):
             spec=client.V1PodSpec(
                 restart_policy="Never",
                 containers=[container],
+                volumes=volumes if volumes else None,
                 security_context=client.V1PodSecurityContext(fs_group=1000),
+                affinity=affinity,
             ),
         )
 
