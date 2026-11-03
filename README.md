@@ -21,6 +21,11 @@
   </p>
 </div>
 
+> **Fork notice:** This is a fork of [`mckinsey/agents-at-scale-ark`](https://github.com/mckinsey/agents-at-scale-ark)
+> that adds a **Substrate sandboxed execution backend** and **human-in-the-loop tool approval**.
+> The fork's work lives on the `feat/substrate-exec-engine` branch; `main` mirrors upstream.
+> See [FORK.md](FORK.md) for details.
+
 ## What is Ark?
 
 Ark is a declarative toolkit for building and hosting distributed AI agents. By defining what agents should do rather than how they do it, Ark eliminates vendor lock-in and ensures your applications stay adaptable as AI evolves.

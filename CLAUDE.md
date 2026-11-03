@@ -1,5 +1,39 @@
 # CLAUDE.md
 
+# Fork Context (read first)
+
+This is a **fork** of [`mckinsey/agents-at-scale-ark`](https://github.com/mckinsey/agents-at-scale-ark),
+owned by Aman Vivek Ramkumar (`amanvr/agents-at-scale-ark`). It exists to develop and host the
+**Substrate execution backend** for Ark — running agents as sandboxed Substrate actors instead
+of in-cluster pods — plus the **human-in-the-loop (HITL) tool-approval** work that rides on it.
+See [FORK.md](FORK.md) for the full rationale.
+
+Branch layout:
+- **`main`** — a clean mirror of upstream `mckinsey/agents-at-scale-ark` `main`. Do NOT commit
+  fork work here; it must stay fast-forwardable from upstream. Sync with
+  `git fetch upstream && git merge --ff-only upstream/main`.
+- **`feat/substrate-exec-engine`** — where the fork's work lives. This is the default working
+  branch for Claude sessions in this repo.
+
+What the fork adds (all on `feat/substrate-exec-engine`):
+- `services/ark-substrate-executor/` — an A2A `ExecutionEngine` that bridges a Query to the
+  Substrate actor lifecycle (ActorTemplate, create/resume actor, EgressPolicy) via the `ateapi`.
+- `services/ark-runner/` — a config-driven PID-1 runner image that runs inside the gVisor
+  sandbox and executes the agent (default `completions` adapter), per Substrate's runner contract.
+- `lib/ark-sdk/` overlay changes — HITL types, `ExecutorApp` input-required/resumption handling,
+  and `broker.send_event`, so every ark-sdk executor (not just substrate) supports HITL.
+- `openspec/changes/substrate-execution-backend/` — the OpenSpec proposal, design, and tasks.
+
+Status: validated end-to-end on minikube against a live Substrate `ateapi`; HITL
+(approve / reject / timeout / cascade) verified. Details and gotchas in
+`services/ark-substrate-executor/docs/mcp-tool-calling-investigation.md` and `BRINGUP.md`.
+
+Pushing: this fork is public and not under the `mckinsey` org, so the machine git-guard blocks
+pushes. Use its sanctioned audited bypass (`GIT_GUARD_REASON="<reason, 10+ chars>" git push`),
+never `--no-verify`.
+
+Everything below is inherited from upstream and applies as written.
+
 **NEVER add comments** to generated code unless explicitly requested by the user
 
 # Pre-Push Gates (Non-Negotiable)
