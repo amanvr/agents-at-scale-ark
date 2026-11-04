@@ -24,7 +24,7 @@
 - [x] 3.3 Derive an `EgressPolicy` from `modelRef` + `tools`/`mcpServers` and apply it per actor (default-deny otherwise)
 - [x] 3.4 Move credential delivery to Substrate egress-gateway injection (zero-creds-in-sandbox)
 - [x] 3.5 Add a non-default development allow-all egress toggle
-- [ ] 3.6 e2e: undeclared host denied, declared model/tool reachable, credentials absent from the sandbox
+- [x] 3.6 e2e: undeclared host denied, declared model/tool reachable, credentials absent from the sandbox (chainsaw `tests/substrate-executor-egress`, verified on minikube: declared model reachable + an undeclared `http` fetch denied under default-deny. Fetcher-tool hosts are deliberately not auto-allowlisted — a fetcher reaches arbitrary hosts, so they stay subject to default-deny. Credentials-absent documented + manually verified, see the test README)
 
 ## 4. Phase 3 — Density + stateful sessions
 
@@ -39,4 +39,4 @@
 - [x] 5.2 Keep the `completions` executor as the non-sandboxed tier; document the routing rule
 - [ ] 5.3 Deprecate and retire `ark-sandbox` and per-framework executor Deployments (announce BREAKING for dependents)
 - [x] 5.4 Documentation: the executor and runner contract, egress derivation, and the per-agent opt-in guide
-- [ ] 5.5 Add e2e/chainsaw coverage for the Substrate engine path (success, failure, egress-denied)
+- [x] 5.5 Add e2e/chainsaw coverage for the Substrate engine path (success, failure, egress-denied) (`tests/substrate-executor` success+failure and `tests/substrate-executor-egress` reachable+denied, both green on minikube; failure now surfaces promptly via a runner error sentinel instead of the result-collection timeout)

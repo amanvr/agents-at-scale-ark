@@ -1,0 +1,17 @@
+# A built-in http (fetcher) tool pointing at a real, reachable host (example.com). Fetcher
+# hosts are NOT auto-added to the actor's egress allowlist (a fetcher reaches arbitrary hosts),
+# so under default-deny this fetch is blocked. example.com is resolvable and would succeed if
+# allowed, so a failure proves egress — not DNS — blocked it.
+apiVersion: ark.mckinsey.com/v1alpha1
+kind: Tool
+metadata:
+  name: substrate-egress-fetch
+spec:
+  type: http
+  description: "Fetch https://example.com/ and return the response body."
+  inputSchema:
+    type: object
+    properties: {}
+  http:
+    url: "https://example.com/"
+    method: GET

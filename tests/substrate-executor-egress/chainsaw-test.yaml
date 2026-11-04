@@ -1,0 +1,114 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: substrate-executor-egress
+  labels:
+    # Requires a live Agent Substrate + the ark-substrate-executor deployed and the `substrate`
+    # ExecutionEngine registered (see services/ark-substrate-executor/BRINGUP.md). This test
+    # toggles the executor's AX_ALLOW_ALL_EGRESS to exercise default-deny, then restores it.
+    # Excluded from default runs; select explicitly once the stack is up.
+    requires-substrate: "true"
+spec:
+  description: >-
+    Under egress default-deny (AX_ALLOW_ALL_EGRESS=false): a declared host (the agent's model)
+    is reachable and the query completes, while an undeclared, model-chosen fetch target is
+    blocked. The allow-all toggle is restored in finally regardless of outcome. Covers OpenSpec
+    substrate-execution-backend tasks 3.6 and the egress-denied part of 5.5.
+  concurrent: false
+  steps:
+  - name: precondition
+    try:
+    # Fail fast with a clear message if the Substrate engine is not registered.
+    - assert:
+        resource:
+          apiVersion: ark.mckinsey.com/v1prealpha1
+          kind: ExecutionEngine
+          metadata:
+            name: substrate
+            namespace: ark-system
+
+  - name: egress-default-deny
+    try:
+    # 1. Turn OFF the dev allow-all so the per-actor derived allowlist (default-deny) applies.
+    #    Toggling env restarts the executor, so wait for the Service to have a ready endpoint
+    #    again before dispatching queries — otherwise the controller's A2A call races the
+    #    rollout and the query errors with "connection refused".
+    - script:
+        content: |
+          kubectl set env deploy/ark-substrate-executor -n ark-system AX_ALLOW_ALL_EGRESS=false
+          kubectl rollout status deploy/ark-substrate-executor -n ark-system --timeout=120s
+          for i in $(seq 1 30); do
+            eps=$(kubectl get endpoints ark-substrate-executor -n ark-system -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null)
+            [ -n "$eps" ] && break
+            sleep 2
+          done
+          sleep 5
+
+    # 2. Declared host reachable: the plain agent only needs the model host, which is derived
+    #    from modelRef into the allowlist. If egress blocked it, the query would error, not done.
+    - apply:
+        file: manifests/a00-model.yaml
+    - apply:
+        file: manifests/a10-agent-plain.yaml
+    - apply:
+        file: manifests/a11-query-reachable.yaml
+    - wait:
+        apiVersion: ark.mckinsey.com/v1alpha1
+        kind: Query
+        name: substrate-egress-reachable
+        timeout: 300s
+        for:
+          condition:
+            name: Completed
+            value: 'True'
+    - assert:
+        resource:
+          apiVersion: ark.mckinsey.com/v1alpha1
+          kind: Query
+          metadata:
+            name: substrate-egress-reachable
+          status:
+            phase: done
+
+    # 3. Undeclared host denied: the fetch tool's host is model-supplied, so it is NOT in the
+    #    derived allowlist. example.com is real/resolvable, so a failure means egress blocked it.
+    - apply:
+        file: manifests/a01-fetch-tool.yaml
+    - apply:
+        file: manifests/a02-agent-fetch.yaml
+    - apply:
+        file: manifests/a03-query-denied.yaml
+    - wait:
+        apiVersion: ark.mckinsey.com/v1alpha1
+        kind: Query
+        name: substrate-egress-denied
+        timeout: 300s
+        for:
+          condition:
+            name: Completed
+            value: 'True'
+    # The agent is told to echo the tool's raw result; a blocked fetch surfaces as an error.
+    - script:
+        content: |
+          content=$(kubectl get query substrate-egress-denied -n $NAMESPACE -o jsonpath='{.status.response.content}')
+          echo "denied-query response: $content"
+          echo "$content" | grep -qiE 'error|denied|refused|unreachable|could not|failed|timed out|connection|blocked' \
+            || { echo "FAIL: expected the undeclared-host fetch to be blocked under egress default-deny"; exit 1; }
+    catch:
+    - events: {}
+    - describe:
+        apiVersion: ark.mckinsey.com/v1alpha1
+        kind: Query
+        name: substrate-egress-reachable
+    - describe:
+        apiVersion: ark.mckinsey.com/v1alpha1
+        kind: Query
+        name: substrate-egress-denied
+    - script:
+        content: kubectl logs deploy/ark-substrate-executor -n ark-system --tail=200 || true
+    finally:
+    # Always restore the dev allow-all egress toggle so the cluster is left as found.
+    - script:
+        content: |
+          kubectl set env deploy/ark-substrate-executor -n ark-system AX_ALLOW_ALL_EGRESS=true
+          kubectl rollout status deploy/ark-substrate-executor -n ark-system --timeout=120s

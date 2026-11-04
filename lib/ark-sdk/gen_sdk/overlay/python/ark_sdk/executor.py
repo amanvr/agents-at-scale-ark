@@ -101,6 +101,20 @@ class MCPServerConfig(BaseModel):
     approvals: list[ToolApproval] = []
 
 
+class HTTPTool(BaseModel):
+    """A built-in `http` (fetcher) tool the runner calls directly over HTTP.
+
+    URL may contain `{param}` placeholders filled from the model's call arguments
+    (URL-encoded), mirroring the Go HTTPExecutor. body is a template for POST/PUT/PATCH."""
+    name: str
+    description: str = ""
+    url: str
+    method: str = "GET"
+    headers: dict[str, str] = {}
+    body: str = ""
+    inputSchema: dict[str, Any] = {}
+
+
 class Message(BaseModel):
     """Message in conversation history."""
     role: str
@@ -154,6 +168,7 @@ class ExecutionEngineRequest(BaseModel):
     agent: AgentConfig
     userInput: Message
     mcpServers: list[MCPServerConfig] = []
+    httpTools: list[HTTPTool] = []
     conversationId: str = ""
     query_annotations: dict[str, str] = {}
     execution_engine_annotations: dict[str, str] = {}

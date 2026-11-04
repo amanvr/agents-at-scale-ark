@@ -8,15 +8,19 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from abc import ABC, abstractmethod
 from typing import Any
+from urllib.parse import quote
+
+import httpx
 
 from ark_sdk.executor import (
     ApprovalRequiredError,
-    CompletedToolResult,
     ExecutionContext,
     ExecutionEngineRequest,
+    HTTPTool,
     Message,
     ToolApprovalConfig,
 )
@@ -27,6 +31,21 @@ from .mcp_client import MCPClient
 logger = logging.getLogger(__name__)
 
 MAX_TOOL_ITERATIONS = 10
+HTTP_TOOL_TIMEOUT_SECONDS = 30
+# The egress gateway re-signs outbound TLS with its own CA; the sandbox may not trust it.
+# Mirror model_client: ARK_RUNNER_TLS_INSECURE=true skips verification.
+_TLS_VERIFY = os.environ.get("ARK_RUNNER_TLS_INSECURE", "").lower() not in ("1", "true", "yes")
+
+_URL_PARAM = re.compile(r"\{([^}]+)\}")
+
+
+def _substitute_url(url_template: str, args: dict[str, Any]) -> str:
+    """Fill {param} placeholders from the model's call arguments, URL-encoding each value
+    (mirrors the Go HTTPExecutor.substituteURLParameters)."""
+    def repl(m: re.Match) -> str:
+        key = m.group(1)
+        return quote(str(args[key]), safe="") if key in args else m.group(0)
+    return _URL_PARAM.sub(repl, url_template)
 
 
 def _go_fmt(value: Any) -> str:
@@ -88,14 +107,19 @@ class CompletionsAdapter(FrameworkAdapter):
     async def run(self, request: ExecutionEngineRequest) -> list[Message]:
         agent = request.agent
 
-        tools, tool_servers = await self._discover_tools(request)
-        logger.info("discovered %d tools from %d MCP server(s)", len(tools), len(getattr(request, "mcpServers", None) or []))
+        tools, dispatch = await self._discover_tools(request)
+        logger.info(
+            "discovered %d tools from %d MCP server(s) and %d http tool(s)",
+            len(tools),
+            len(getattr(request, "mcpServers", None) or []),
+            len(getattr(request, "httpTools", None) or []),
+        )
 
         # HITL approval gates, keyed by the tool name the model calls.
         approvals = self._build_approvals(request)
 
         if request.resume is not None:
-            messages = await self._rebuild_for_resume(request, tool_servers)
+            messages = await self._rebuild_for_resume(request, dispatch)
         else:
             messages = [
                 {"role": "system", "content": agent.prompt},
@@ -114,7 +138,7 @@ class CompletionsAdapter(FrameworkAdapter):
             # otherwise appends each tool result message.
             self._gate_or_run_prep(tool_calls, approvals, agent, request, messages)
             for call in tool_calls:
-                messages.append(await self._invoke_tool(call, tool_servers))
+                messages.append(await self._invoke_tool(call, dispatch))
 
         logger.warning("tool loop hit MAX_TOOL_ITERATIONS=%d", MAX_TOOL_ITERATIONS)
         return [Message(role="assistant", content=messages[-1].get("content") or "")]
@@ -164,7 +188,7 @@ class CompletionsAdapter(FrameworkAdapter):
         raise ApprovalRequiredError(pending, gate_config, context)
 
     async def _rebuild_for_resume(
-        self, request: ExecutionEngineRequest, tool_servers: dict[str, Any]
+        self, request: ExecutionEngineRequest, dispatch: dict[str, Any]
     ) -> list[dict[str, Any]]:
         """Rebuild the paused conversation from resume context and apply the human decision.
 
@@ -185,7 +209,7 @@ class CompletionsAdapter(FrameworkAdapter):
         for call in resume.toolCalls:
             if resume.decision == "approved":
                 _emit_event(f"approved tool {call.get('function', {}).get('name', '')}")
-                messages.append(await self._invoke_tool(call, tool_servers))
+                messages.append(await self._invoke_tool(call, dispatch))
             else:
                 _emit_event(f"rejected tool {call.get('function', {}).get('name', '')}")
                 messages.append({
@@ -198,15 +222,18 @@ class CompletionsAdapter(FrameworkAdapter):
     async def _discover_tools(
         self, request: ExecutionEngineRequest
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        """List tools from each MCP server and build the OpenAI tool schema + a name->server map."""
+        """Build the OpenAI tool schema for every available tool and a name->dispatch map.
+
+        dispatch[name] = ("mcp", server) for MCP tools, ("http", HTTPTool) for fetcher tools.
+        """
         tools: list[dict[str, Any]] = []
-        servers: dict[str, Any] = {}
+        dispatch: dict[str, Any] = {}
         for server in getattr(request, "mcpServers", None) or []:
             try:
                 async with MCPClient(server.url, headers=server.headers) as mcp:
                     for tool in await mcp.list_tools():
                         name = tool["name"]
-                        servers[name] = server
+                        dispatch[name] = ("mcp", server)
                         tools.append(
                             {
                                 "type": "function",
@@ -219,10 +246,23 @@ class CompletionsAdapter(FrameworkAdapter):
                         )
             except Exception:
                 logger.exception("failed to list tools from MCP server %s", server.name)
-        return tools, servers
 
-    async def _invoke_tool(self, call: dict[str, Any], tool_servers: dict[str, Any]) -> dict[str, Any]:
-        """Run one tool call against its MCP server and return the OpenAI tool-result message."""
+        for http_tool in getattr(request, "httpTools", None) or []:
+            dispatch[http_tool.name] = ("http", http_tool)
+            tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": http_tool.name,
+                        "description": http_tool.description,
+                        "parameters": http_tool.inputSchema or {"type": "object", "properties": {}},
+                    },
+                }
+            )
+        return tools, dispatch
+
+    async def _invoke_tool(self, call: dict[str, Any], dispatch: dict[str, Any]) -> dict[str, Any]:
+        """Run one tool call (MCP or http) and return the OpenAI tool-result message."""
         fn = call.get("function", {})
         name = fn.get("name", "")
         try:
@@ -230,17 +270,38 @@ class CompletionsAdapter(FrameworkAdapter):
         except json.JSONDecodeError:
             args = {}
         _emit_event(f"calling tool {name}({args})")
-        server = tool_servers.get(name)
-        if server is None:
-            result = f"error: no MCP server provides tool {name!r}"
+        entry = dispatch.get(name)
+        if entry is None:
+            result = f"error: no tool named {name!r}"
         else:
+            kind, target = entry
             try:
-                async with MCPClient(server.url, headers=server.headers) as mcp:
-                    result = await mcp.call_tool(name, args)
+                if kind == "http":
+                    result = await self._invoke_http_tool(target, args)
+                else:
+                    async with MCPClient(target.url, headers=target.headers) as mcp:
+                        result = await mcp.call_tool(name, args)
             except Exception as e:
                 logger.exception("tool %s failed", name)
                 result = f"error: {e}"
         return {"role": "tool", "tool_call_id": call.get("id", ""), "content": result}
+
+    async def _invoke_http_tool(self, tool: HTTPTool, args: dict[str, Any]) -> str:
+        """Call a built-in http (fetcher) tool. Mirrors the Go HTTPExecutor: {param} URL
+        substitution, method/headers/body, 10MB response cap, non-2xx surfaced as an error.
+        An egress-blocked host raises in httpx and is returned as an error string so the model
+        sees the failure (and the query does not silently succeed)."""
+        url = _substitute_url(tool.url, args)
+        method = (tool.method or "GET").upper()
+        body = None
+        if tool.body and method in ("POST", "PUT", "PATCH"):
+            body = _substitute_url(tool.body, args)
+        async with httpx.AsyncClient(timeout=HTTP_TOOL_TIMEOUT_SECONDS, verify=_TLS_VERIFY) as http:
+            resp = await http.request(method, url, headers=tool.headers or None, content=body)
+            text = resp.text[: 10 << 20]
+            if resp.status_code >= 400:
+                return f"error: HTTP {resp.status_code}: {text} (URL: {url})"
+            return text
 
 
 class LangChainAdapter(FrameworkAdapter):

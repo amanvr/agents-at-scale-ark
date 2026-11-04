@@ -1,0 +1,10 @@
+apiVersion: ark.mckinsey.com/v1alpha1
+kind: Query
+metadata:
+  name: substrate-egress-reachable
+spec:
+  input: "In one sentence, what is 2 + 2?"
+  target:
+    type: agent
+    name: substrate-egress-plain
+  ttl: 10m

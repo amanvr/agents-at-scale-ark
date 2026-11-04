@@ -825,6 +825,16 @@ class TestBuildMCPServers(unittest.IsolatedAsyncioTestCase):
             tool_crd.spec.mcp = mcp_ref
         else:
             tool_crd.spec.mcp = None
+        if tool_type == "http":
+            http = MagicMock()
+            http.url = "https://api.weather.example/forecast"
+            http.method = "GET"
+            http.headers = None
+            http.body = None
+            tool_crd.spec.http = http
+            tool_crd.spec.description = "weather"
+            tool_crd.spec.input_schema = None
+            tool_crd.spec.inputSchema = None
         return tool_crd
 
     def _make_mcp_server_crd(self, address="http://server:8080/mcp", transport="http", timeout="30s", headers=None):
@@ -955,7 +965,7 @@ class TestBuildMCPServers(unittest.IsolatedAsyncioTestCase):
 
     @patch("ark_sdk.k8s.init_k8s", new_callable=AsyncMock)
     @patch("ark_sdk.client.with_ark_client")
-    async def test_mixed_tool_types_only_mcp_included(self, mock_with_client, mock_init_k8s):
+    async def test_mixed_tool_types_mcp_and_http_included(self, mock_with_client, mock_init_k8s):
         mock_ark = AsyncMock()
 
         mock_query = MagicMock()
@@ -992,17 +1002,19 @@ class TestBuildMCPServers(unittest.IsolatedAsyncioTestCase):
         mock_with_client.return_value = mock_ctx
 
         ref = QueryRef(name="q1", namespace="default")
-        with self.assertLogs("ark_sdk.extensions.query", level="WARNING") as log:
-            request = await resolve_query(ref, "hi")
+        request = await resolve_query(ref, "hi")
 
+        # mcp tool resolves into mcpServers; the http (fetcher) tool now resolves into
+        # httpTools (previously dropped) and each Tool CRD is fetched exactly once.
         self.assertEqual(len(request.mcpServers), 1)
         self.assertEqual(request.mcpServers[0].name, "github-mcp")
         self.assertEqual(request.mcpServers[0].tools, ["search"])
 
-        message = "\n".join(log.output)
-        self.assertIn("a1", message)
-        self.assertIn("weather-api (http)", message)
-        self.assertIn("only mcp tools", message)
+        self.assertEqual(len(request.httpTools), 1)
+        self.assertEqual(request.httpTools[0].name, "weather-api")
+        self.assertEqual(request.httpTools[0].url, "https://api.weather.example/forecast")
+
+        self.assertEqual(mock_ark.tools.a_get.await_count, 2)
 
     @patch("ark_sdk.k8s.init_k8s", new_callable=AsyncMock)
     @patch("ark_sdk.client.with_ark_client")

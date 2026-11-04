@@ -18,6 +18,7 @@ from ..executor import (
     ArgumentMatch,
     ExecutionContext,
     ExecutionEngineRequest,
+    HTTPTool,
     MCPServerConfig,
     Message,
     Model,
@@ -287,7 +288,7 @@ async def _resolve_from_query(
 
     agent = await ark.agents.a_get(target_name, namespace)
     agent_config = await _build_agent_config(ark, agent, query, namespace, impersonation)
-    mcp_servers = await _build_mcp_servers(ark, agent, namespace, impersonation)
+    mcp_servers, http_tools = await _build_tools(ark, agent, namespace, impersonation)
 
     query_annotations = query.metadata.get("annotations", {}) if query.metadata else {}
     execution_engine_annotations = await _resolve_execution_engine_annotations(agent, namespace, impersonation)
@@ -299,6 +300,7 @@ async def _resolve_from_query(
         agent=agent_config,
         userInput=Message(role="user", content=user_input),
         mcpServers=mcp_servers,
+        httpTools=http_tools,
         conversationId=conversation_id,
         query_annotations=query_annotations,
         execution_engine_annotations=execution_engine_annotations,
@@ -712,17 +714,35 @@ def _merge_approval(tool_a: Optional[dict], agent_a: Optional[dict]) -> Optional
     return ToolApprovalConfig(required=True, timeout=timeout, onTimeout=on_timeout, argumentMatches=matches)
 
 
-async def _build_mcp_servers(
+def _input_schema_to_dict(raw: Any) -> dict[str, Any]:
+    """Tool.spec.inputSchema is a RawExtension — may arrive as a dict or a JSON string."""
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw.strip():
+        try:
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+
+async def _build_tools(
     ark: Any,
     agent: Any,
     namespace: str,
     impersonation: Optional[ImpersonationConfig] = None,
-) -> list[MCPServerConfig]:
+) -> tuple[list[MCPServerConfig], list[HTTPTool]]:
+    """Resolve the agent's tools in a single pass (one Tool CRD fetch each): mcp tools into
+    MCPServerConfigs (with merged HITL approval), http (fetcher) tools into HTTPTools (mirroring
+    the Go HTTPExecutor contract — url `{param}` templating, method, headers, body). Other tool
+    types are not supported by ark-sdk executors and are dropped with a warning."""
     if not agent.spec.tools:
-        return []
+        return [], []
 
     server_tools: dict[str, list[str]] = {}
     server_approvals: dict[str, dict[str, ToolApprovalConfig]] = {}
+    http_tools: list[HTTPTool] = []
     dropped: list[str] = []
     for agent_tool in agent.spec.tools:
         tool_name = getattr(agent_tool, "name", None)
@@ -732,42 +752,61 @@ async def _build_mcp_servers(
         try:
             tool_crd = await ark.tools.a_get(tool_name, namespace)
             tool_spec = tool_crd.spec
-
             tool_type = getattr(tool_spec, "type", None)
-            if tool_type != "mcp":
-                if tool_type:
-                    dropped.append(f"{tool_name} ({tool_type})")
-                continue
 
-            mcp_ref = getattr(tool_spec, "mcp", None)
-            if not mcp_ref:
-                continue
-
-            server_ref = getattr(mcp_ref, "mcp_server_ref", None) or getattr(mcp_ref, "mcpServerRef", None)
-            if not server_ref:
-                continue
-
-            server_name = _get_attr_or_key(server_ref, "name")
-            mcp_tool_name = _get_attr_or_key(mcp_ref, "tool_name") or _get_attr_or_key(mcp_ref, "toolName")
-
-            if server_name and mcp_tool_name:
-                if server_name not in server_tools:
-                    server_tools[server_name] = []
-                server_tools[server_name].append(mcp_tool_name)
-                # HITL: merge Tool-CRD + agent-tool approval; record only if required.
-                merged = _merge_approval(
-                    _extract_approval(getattr(tool_spec, "approval", None)),
-                    _extract_approval(getattr(agent_tool, "approval", None)),
-                )
-                if merged is not None:
-                    server_approvals.setdefault(server_name, {})[mcp_tool_name] = merged
+            if tool_type == "mcp":
+                mcp_ref = getattr(tool_spec, "mcp", None)
+                if not mcp_ref:
+                    continue
+                server_ref = getattr(mcp_ref, "mcp_server_ref", None) or getattr(mcp_ref, "mcpServerRef", None)
+                if not server_ref:
+                    continue
+                server_name = _get_attr_or_key(server_ref, "name")
+                mcp_tool_name = _get_attr_or_key(mcp_ref, "tool_name") or _get_attr_or_key(mcp_ref, "toolName")
+                if server_name and mcp_tool_name:
+                    server_tools.setdefault(server_name, []).append(mcp_tool_name)
+                    # HITL: merge Tool-CRD + agent-tool approval; record only if required.
+                    merged = _merge_approval(
+                        _extract_approval(getattr(tool_spec, "approval", None)),
+                        _extract_approval(getattr(agent_tool, "approval", None)),
+                    )
+                    if merged is not None:
+                        server_approvals.setdefault(server_name, {})[mcp_tool_name] = merged
+            elif tool_type == "http":
+                http = getattr(tool_spec, "http", None)
+                url = _get_attr_or_key(http, "url") if http else None
+                if not isinstance(url, str) or not url:
+                    logger.warning(f"http tool '{tool_name}' has no usable url; skipping")
+                    continue
+                headers: dict[str, str] = {}
+                for header in (_get_attr_or_key(http, "headers") or []):
+                    hname = _get_attr_or_key(header, "name")
+                    hvalue = _get_attr_or_key(header, "value")
+                    if hname and hvalue is not None:
+                        resolved = await _resolve_value_source(hvalue, namespace, impersonation)
+                        if resolved:
+                            headers[hname] = resolved
+                http_tools.append(HTTPTool(
+                    name=tool_name,
+                    description=getattr(tool_spec, "description", "") or "",
+                    url=url,
+                    method=(_get_attr_or_key(http, "method") or "GET"),
+                    headers=headers,
+                    body=(_get_attr_or_key(http, "body") or ""),
+                    inputSchema=_input_schema_to_dict(
+                        getattr(tool_spec, "input_schema", None)
+                        or getattr(tool_spec, "inputSchema", None)
+                    ),
+                ))
+            elif tool_type:
+                dropped.append(f"{tool_name} ({tool_type})")
         except Exception as e:
             logger.warning(f"Failed to resolve tool '{tool_name}': {e}")
 
     if dropped:
         agent_name = agent.metadata.get("name", "unknown") if agent.metadata else "unknown"
         logger.warning(
-            f"Agent '{agent_name}': this executor receives only mcp tools; these "
+            f"Agent '{agent_name}': this executor supports only mcp and http tools; these "
             f"tools were not available to the agent: {', '.join(dropped)}"
         )
 
@@ -782,6 +821,6 @@ async def _build_mcp_servers(
             ]
             servers.append(server_config)
 
-    return servers
+    return servers, http_tools
 
 

@@ -31,6 +31,11 @@ async def _run_agent() -> None:
     except ApprovalRequiredError as approval:
         _emit_approval_required(approval)
         return
+    except Exception as e:
+        # Surface the failure promptly on the result channel so the executor fails the query
+        # immediately, instead of the executor waiting out its result-collection timeout.
+        _emit_error(e)
+        return
     payload = {"messages": [m.model_dump() for m in messages]}
     # Primary result channel: a single stdout sentinel line the executor reads from actor logs
     # (the Control API has no exec/cp). Tagged with the per-query nonce so the executor can pick
@@ -45,6 +50,13 @@ async def _run_agent() -> None:
     except OSError as e:
         logger.warning("could not write result artifact %s: %s", config.result_path(), e)
     logger.info("agent finished")
+
+
+def _emit_error(exc: Exception) -> None:
+    """Emit a terminal error on the result channel so the executor fails the query at once."""
+    payload = {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
+    print(f"{config.RESULT_SENTINEL} {config.nonce()} {json.dumps(payload)}", flush=True)
+    logger.error("agent run failed: %s", exc, exc_info=True)
 
 
 def _emit_approval_required(approval: ApprovalRequiredError) -> None:

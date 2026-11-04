@@ -82,7 +82,12 @@ def _host(url: str) -> str | None:
 
 def _egress_hosts(request: ExecutionEngineRequest) -> tuple[list[str], list[str]]:
     """Derive the (http, https) egress allowlist from the agent's modelRef + mcpServers
-    (specs/substrate-egress-credentials). Model endpoints are https."""
+    (specs/substrate-egress-credentials). Model endpoints are https.
+
+    Built-in `http` (fetcher) tools are deliberately NOT auto-allowlisted: a fetcher reaches
+    arbitrary, model-named hosts, so opening egress to them by default would defeat the
+    sandbox's purpose. Under default-deny a fetch to an undeclared host is blocked; operators
+    that want a given fetch host reachable must grant it explicitly."""
     https: set[str] = set()
     http: set[str] = set()
 
@@ -138,6 +143,8 @@ def _parse_result_logs(logs: str, nonce: str) -> list[Message] | None:
                     ),
                     ExecutionContext(**(payload.get("context") or {})),
                 )
+            if payload.get("status") == "error":
+                raise SubstrateError(payload.get("error") or "agent run failed in the sandbox")
             return [Message(**m) for m in payload.get("messages", [])]
     return None
 

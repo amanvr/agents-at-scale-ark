@@ -1,0 +1,15 @@
+# A plain agent (no tools). Its only egress need is the model host, which is declared via
+# modelRef and therefore allowed under default-deny — proving a declared host is reachable
+# while enforcement is on.
+apiVersion: ark.mckinsey.com/v1alpha1
+kind: Agent
+metadata:
+  name: substrate-egress-plain
+spec:
+  description: Plain agent used to prove the declared model host is reachable under enforcement.
+  prompt: "You are a concise assistant. Answer directly, with no preamble."
+  modelRef:
+    name: substrate-egress-model
+  executionEngine:
+    name: substrate
+    namespace: ark-system
