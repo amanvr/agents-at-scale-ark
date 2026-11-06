@@ -1,0 +1,14 @@
+apiVersion: ark.mckinsey.com/v1alpha1
+kind: Agent
+metadata:
+  name: substrate-sessions-agent
+spec:
+  description: Sandboxed Substrate agent used to prove conversation history continuity.
+  prompt: |
+    You are a concise assistant. Keep answers as short as possible and use prior turns of the
+    conversation when answering.
+  modelRef:
+    name: substrate-sessions-model
+  executionEngine:
+    name: substrate
+    namespace: ark-system

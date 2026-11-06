@@ -246,6 +246,22 @@ class A2AExecutorAdapter(AgentExecutor):
         if not sub_target:
             request.resume = await fetch_resumption(query_ref)
 
+        # Conversation continuity (Ark Memory): load prior turns from the broker and inject them
+        # into the request so the runner can prepend them — parity with the completions executor.
+        # Skip for sub-targets (the calling engine owns a member's memory) and for HITL resume
+        # (the resume context already carries the messages captured at pause time).
+        if broker and not sub_target and request.resume is None:
+            if not conversation_id:
+                # No conversation yet: mint one so history can persist and the controller can
+                # capture it (as the returned A2A contextId) for follow-up turns.
+                minted = await broker.create_conversation()
+                if minted:
+                    conversation_id = minted
+                    request.conversationId = minted
+                    broker.session_id = minted  # so the streamed final chunk reports it
+            if conversation_id:
+                request.history = await broker.get_messages(conversation_id)
+
         begin_request_state()
         self.executor._broker_client = broker
         self.executor._query_status_updater = None if sub_target else QueryStatusUpdater(query_ref)

@@ -22,6 +22,11 @@ _STREAM_TIMEOUT = httpx.Timeout(connect=5.0, read=None, write=None, pool=5.0)
 _COMPLETE_TIMEOUT = httpx.Timeout(10.0)
 _MESSAGES_TIMEOUT = httpx.Timeout(10.0)
 
+# Pagination bounds for loading conversation history (match the broker MAX_LIMIT and the Go
+# completions executor's MessagesPageLimit / MessagesMaxPages).
+_MESSAGES_PAGE_LIMIT = 1000
+_MESSAGES_MAX_PAGES = 1000
+
 _cached_broker_url: Optional[str] = None
 _broker_url_cached = False
 
@@ -159,6 +164,71 @@ class BrokerClient:
                     logger.warning(f"Broker /messages returned {resp.status_code} for query {self.query_name}")
         except Exception as e:
             logger.warning(f"Failed to send messages to broker for query {self.query_name}: {e}")
+
+    async def create_conversation(self) -> Optional[str]:
+        """Mint a new conversation id (POST /conversations). Returns the id or None on failure.
+
+        Mirrors the completions executor, which creates a conversation when a query carries none,
+        so the id can be returned to the controller (as the A2A contextId) for follow-up turns."""
+        url = f"{self.base_url}/conversations"
+        try:
+            async with httpx.AsyncClient(timeout=_MESSAGES_TIMEOUT) as http:
+                resp = await http.post(url, json={})
+                if resp.status_code not in (200, 201):
+                    logger.warning(f"Broker /conversations returned {resp.status_code}")
+                    return None
+                return resp.json().get("conversation_id")
+        except Exception as e:
+            logger.warning(f"Failed to create conversation on broker: {e}")
+            return None
+
+    async def get_messages(self, conversation_id: str) -> list[dict]:
+        """Load the full conversation history (oldest-first, OpenAI-format) from the broker,
+        paginating on hasMore/nextCursor. Warn-and-return-partial on any error; never raises.
+
+        This is the read half that brings ark-sdk executors to parity with the Go completions
+        executor (which loads history via GET /messages before each turn)."""
+        if not conversation_id:
+            return []
+        url = f"{self.base_url}/messages"
+        messages: list[dict] = []
+        cursor: Optional[int] = None
+        try:
+            async with httpx.AsyncClient(timeout=_MESSAGES_TIMEOUT) as http:
+                for _ in range(_MESSAGES_MAX_PAGES):
+                    params: dict = {
+                        "conversation_id": conversation_id,
+                        "limit": _MESSAGES_PAGE_LIMIT,
+                    }
+                    if cursor is not None:
+                        params["cursor"] = cursor
+                    resp = await http.get(url, params=params)
+                    if resp.status_code != 200:
+                        logger.warning(
+                            f"Broker GET /messages returned {resp.status_code} for conversation {conversation_id}"
+                        )
+                        break
+                    body = resp.json()
+                    for item in body.get("items") or []:
+                        msg = item.get("message")
+                        if isinstance(msg, str):
+                            try:
+                                msg = json.loads(msg)
+                            except json.JSONDecodeError:
+                                continue
+                        if isinstance(msg, dict):
+                            messages.append(msg)
+                    if not body.get("hasMore"):
+                        break
+                    next_cursor = body.get("nextCursor")
+                    # Guard against a missing / non-advancing cursor to avoid an infinite loop.
+                    if next_cursor is None or (cursor is not None and next_cursor <= cursor):
+                        logger.warning("Broker pagination cursor did not advance; stopping")
+                        break
+                    cursor = next_cursor
+        except Exception as e:
+            logger.warning(f"Failed to load messages from broker for conversation {conversation_id}: {e}")
+        return messages
 
     def _build_final_chunk(
         self,

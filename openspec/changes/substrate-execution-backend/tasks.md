@@ -28,10 +28,10 @@
 
 ## 4. Phase 3 — Density + stateful sessions
 
-- [ ] 4.1 Reuse one actor per `(agent, conversationId)`; suspend when idle, resume per query (reverted to ephemeral-per-query — resuming a mid-flight golden snapshot proved unreliable; warm reuse deferred)
-- [ ] 4.2 Snapshot-backed session state; decide how it reconciles with Ark `Memory`
-- [ ] 4.3 Idle auto-suspension for density
-- [ ] 4.4 e2e: a follow-up query resumes a warm actor; a stateless agent uses an ephemeral actor
+- [ ] 4.1 Reuse one actor per `(agent, conversationId)`; suspend when idle, resume per query (DEFERRED — ephemeral-per-query kept. Resuming a mid-flight golden snapshot proved unreliable, and continuity is now achieved WITHOUT warm reuse via Ark Memory (4.2), so warm reuse is a pure latency/density optimization that would also need a runner work-delivery redesign — the request is baked into the actor env at boot)
+- [x] 4.2 Snapshot-backed session state; decide how it reconciles with Ark `Memory` (RESOLVED in favor of Ark Memory as the single source of truth — NOT actor snapshots. The ExecutorApp loads prior turns from the broker (`GET /messages` by `conversationId`, minting one via `POST /conversations` when absent) and the runner prepends them, bringing the ark-sdk executor path to parity with completions. Actors stay stateless/ephemeral)
+- [ ] 4.3 Idle auto-suspension for density (DEFERRED with 4.1 — only relevant to warm actor reuse, which is not pursued)
+- [x] 4.4 e2e: a follow-up query continues the conversation; a fresh conversationId starts clean (reinterpreted from "resumes a warm actor" → "continues via broker-backed history on an ephemeral actor", since state lives in Ark Memory. See `tests/substrate-executor-sessions`: turn 2 recalls a fact from turn 1 on a shared conversationId; a different conversationId does not. Verified on minikube)
 
 ## 5. Compatibility, retirement, and docs
 

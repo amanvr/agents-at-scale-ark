@@ -121,10 +121,14 @@ class CompletionsAdapter(FrameworkAdapter):
         if request.resume is not None:
             messages = await self._rebuild_for_resume(request, dispatch)
         else:
-            messages = [
-                {"role": "system", "content": agent.prompt},
-                {"role": request.userInput.role or "user", "content": request.userInput.content},
-            ]
+            # Prepend prior conversation history (loaded by the ExecutorApp from Ark Memory)
+            # between the system prompt and the current input — parity with the completions
+            # executor's PrepareModelMessages (memory ++ input).
+            messages = [{"role": "system", "content": agent.prompt}]
+            messages.extend(getattr(request, "history", None) or [])
+            messages.append(
+                {"role": request.userInput.role or "user", "content": request.userInput.content}
+            )
 
         for _ in range(MAX_TOOL_ITERATIONS):
             assistant = await model_client.complete(agent.model, messages, tools=tools or None)

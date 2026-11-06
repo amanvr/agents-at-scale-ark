@@ -175,6 +175,12 @@ class ExecutionEngineRequest(BaseModel):
     message_ttl_seconds: int | None = None
     # Set only on a resumption dispatch (after a human approval/rejection decision).
     resume: Optional[ResumeContext] = None
+    # Prior conversation history loaded by the ExecutorApp from Ark Memory (the broker),
+    # oldest-first, OpenAI-format. The runner prepends it between the system prompt and the
+    # current userInput on the fresh path. Empty when there is no broker, a new conversation,
+    # or a resumption (whose pending state already carries the messages). Raw dicts (not Message)
+    # so assistant tool_calls / tool-result fields survive the round-trip.
+    history: list[dict[str, Any]] = []
 
 
 class ExecutionEngineResponse(BaseModel):

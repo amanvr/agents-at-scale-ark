@@ -1,0 +1,15 @@
+# Turn 2: same conversationId as turn 1 — the agent must recall "teal" from loaded history.
+apiVersion: ark.mckinsey.com/v1alpha1
+kind: Query
+metadata:
+  name: substrate-sessions-2
+spec:
+  input: "What is my favorite color? Reply with exactly one word. If you do not know, reply: unknown"
+  target:
+    type: agent
+    name: substrate-sessions-agent
+  memory:
+    name: default
+    namespace: default
+  conversationId: substrate-sessions-conv
+  ttl: 1h0m0s
