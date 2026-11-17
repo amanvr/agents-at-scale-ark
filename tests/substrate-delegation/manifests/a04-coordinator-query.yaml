@@ -1,0 +1,10 @@
+apiVersion: ark.mckinsey.com/v1alpha1
+kind: Query
+metadata:
+  name: delegation-demo
+spec:
+  input: "What is the capital of France?"
+  target:
+    type: agent
+    name: coordinator
+  ttl: 10m

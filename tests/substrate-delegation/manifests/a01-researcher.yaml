@@ -1,0 +1,15 @@
+# The delegation target: a sandboxed agent the coordinator calls as a tool.
+apiVersion: ark.mckinsey.com/v1alpha1
+kind: Agent
+metadata:
+  name: researcher
+spec:
+  description: Sandboxed research agent.
+  prompt: |
+    You are a researcher. Answer the question with a single factual sentence that
+    begins with "RESEARCHER:".
+  modelRef:
+    name: substrate-model
+  runtime:
+    tier: sandboxed
+    framework: completions

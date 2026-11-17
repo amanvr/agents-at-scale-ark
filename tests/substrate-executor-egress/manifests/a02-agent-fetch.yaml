@@ -1,0 +1,17 @@
+apiVersion: ark.mckinsey.com/v1alpha1
+kind: Agent
+metadata:
+  name: substrate-egress-agent
+spec:
+  description: Agent with an http fetch tool to an undeclared host, to prove egress is denied.
+  prompt: |
+    Call the substrate-egress-fetch tool exactly once, then reply with ONLY the tool's raw
+    result text, verbatim, nothing else.
+  modelRef:
+    name: substrate-egress-model
+  tools:
+    - type: http
+      name: substrate-egress-fetch
+  executionEngine:
+    name: substrate
+    namespace: ark-system

@@ -1,0 +1,68 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ark-substrate-executor
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: ark-substrate-executor }
+  template:
+    metadata:
+      labels: { app: ark-substrate-executor }
+    spec:
+      serviceAccountName: ark-substrate-executor
+      containers:
+        - name: executor
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.service.port }}
+          env:
+            - { name: PORT, value: {{ .Values.service.port | quote }} }
+            - { name: ARK_RUNNER_IMAGE, value: {{ .Values.runnerImage | quote }} }
+            - { name: ARK_SUBSTRATE_ATEAPI_ADDR, value: {{ .Values.substrate.ateapiAddr | quote }} }
+            - { name: SUBSTRATE_AUTHORITY, value: {{ .Values.substrate.authority | quote }} }
+            - { name: ARK_SUBSTRATE_ATESPACE, value: {{ .Values.substrate.atespace | quote }} }
+            - { name: ARK_SUBSTRATE_SNAPSHOT_URI, value: {{ .Values.substrate.snapshotUri | quote }} }
+            - { name: ARK_SUBSTRATE_SANDBOX_CONFIG, value: {{ .Values.substrate.sandboxConfig | quote }} }
+            {{- if .Values.substrate.credentialUri }}
+            - { name: ARK_SUBSTRATE_CREDENTIAL_URI, value: {{ .Values.substrate.credentialUri | quote }} }
+            {{- end }}
+            {{- if .Values.substrate.ateapiAuth.enabled }}
+            - { name: SUBSTRATE_TOKEN_FILE, value: {{ .Values.substrate.ateapiAuth.tokenFile | quote }} }
+            - { name: SUBSTRATE_CA_FILE, value: {{ .Values.substrate.ateapiAuth.caFile | quote }} }
+            {{- end }}
+            {{- if .Values.dev.tlsInsecure }}
+            - { name: ARK_RUNNER_TLS_INSECURE, value: "true" }
+            {{- end }}
+            {{- if .Values.dev.allowAllEgress }}
+            - { name: AX_ALLOW_ALL_EGRESS, value: "true" }
+            {{- end }}
+            {{- if .Values.delegationGatewayUrl }}
+            # Delegation gateway (Phase C): sandboxed agent/team tool calls are POSTed here.
+            - { name: ARK_DELEGATION_GATEWAY_URL, value: {{ .Values.delegationGatewayUrl | quote }} }
+            {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          {{- if .Values.substrate.ateapiAuth.enabled }}
+          volumeMounts:
+            - { name: ateapi-token, mountPath: /var/run/secrets/ateapi, readOnly: true }
+            - { name: servicedns-ca, mountPath: /run/servicedns-ca, readOnly: true }
+          {{- end }}
+      {{- if .Values.substrate.ateapiAuth.enabled }}
+      volumes:
+        - name: ateapi-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: {{ .Values.substrate.ateapiAuth.tokenAudience | quote }}
+                  expirationSeconds: 3600
+                  path: token
+        - name: servicedns-ca
+          projected:
+            sources:
+              - clusterTrustBundle:
+                  name: {{ .Values.substrate.ateapiAuth.clusterTrustBundle | quote }}
+                  path: trust-bundle.pem
+      {{- end }}

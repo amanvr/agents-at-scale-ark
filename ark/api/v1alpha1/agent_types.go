@@ -109,13 +109,42 @@ type ExecutionEngineRef struct {
 	// Namespace of the ExecutionEngine resource. Defaults to the agent's namespace if not specified
 	Namespace string `json:"namespace,omitempty"`
 }
+
+const (
+	// RuntimeTierInProcess runs the agent without a sandbox (the default).
+	RuntimeTierInProcess = "in-process"
+	// RuntimeTierSandboxed runs the agent inside an isolated sandbox.
+	RuntimeTierSandboxed = "sandboxed"
+	// RuntimeFrameworkCompletions is the default framework adapter.
+	RuntimeFrameworkCompletions = "completions"
+)
+
+// AgentRuntime selects how an agent executes: a tier that decides where it runs
+// and a framework that selects the runner adapter. Preferred over the deprecated
+// executionEngine field.
+type AgentRuntime struct {
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:Enum=in-process;sandboxed
+	// +kubebuilder:default=in-process
+	// Tier selects where the agent runs: in-process (non-sandboxed) or sandboxed.
+	Tier string `json:"tier,omitempty"`
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:default=completions
+	// Framework selects the runner adapter (e.g. completions, langchain, claude).
+	Framework string `json:"framework,omitempty"`
+}
+
 type AgentSpec struct {
 	Prompt      string `json:"prompt,omitempty"`
 	Description string `json:"description,omitempty"`
 	// +kubebuilder:validation:Optional
 	ModelRef *AgentModelRef `json:"modelRef,omitempty"`
 	// +kubebuilder:validation:Optional
-	// ExecutionEngine to use for running this agent. If not specified, uses the built-in OpenAI-compatible engine
+	// Runtime selects execution as a (tier, framework). Preferred over executionEngine.
+	Runtime *AgentRuntime `json:"runtime,omitempty"`
+	// +kubebuilder:validation:Optional
+	// ExecutionEngine to use for running this agent. If not specified, uses the built-in OpenAI-compatible engine.
+	// Deprecated: use runtime instead.
 	ExecutionEngine *ExecutionEngineRef `json:"executionEngine,omitempty"`
 	Tools           []AgentTool         `json:"tools,omitempty"`
 	// +kubebuilder:validation:Optional

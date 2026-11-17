@@ -1,0 +1,10 @@
+apiVersion: ark.mckinsey.com/v1alpha1
+kind: Query
+metadata:
+  name: substrate-egress-denied
+spec:
+  input: "Fetch the page and reply with only the tool's raw result."
+  target:
+    type: agent
+    name: substrate-egress-agent
+  ttl: 10m

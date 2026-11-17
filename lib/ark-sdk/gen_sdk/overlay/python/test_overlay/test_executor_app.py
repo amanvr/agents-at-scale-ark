@@ -8,9 +8,11 @@ import pytest
 from ark_sdk.executor import (
     AgentConfig,
     BaseExecutor,
+    ExecutionContext,
     ExecutionEngineRequest,
     Message,
     Model,
+    ResumeContext,
 )
 from ark_sdk.executor_app import A2AExecutorAdapter, ExecutorApp
 from ark_sdk.extensions.query import QUERY_EXTENSION_URI, QueryRef, QueryTargetRef
@@ -102,7 +104,9 @@ class TestAdapterBrokerMessages:
         assert messages[-1]["content"] == "stub"
 
     @pytest.mark.anyio
-    async def test_skipped_when_no_conversation_id(self):
+    async def test_mints_conversation_when_absent(self):
+        # With no conversation id, the ExecutorApp now mints one so history can persist and the
+        # controller can capture it (previously the save was simply skipped).
         executor = StubExecutor("test")
         adapter = A2AExecutorAdapter(executor)
 
@@ -113,6 +117,8 @@ class TestAdapterBrokerMessages:
         event_queue = AsyncMock()
 
         broker = AsyncMock()
+        broker.create_conversation = AsyncMock(return_value="conv-minted")
+        broker.get_messages = AsyncMock(return_value=[])
         broker.send_messages = AsyncMock()
         broker.send_chunk = AsyncMock()
         broker.send_final_chunk = AsyncMock()
@@ -133,10 +139,19 @@ class TestAdapterBrokerMessages:
         ), patch(
             "ark_sdk.executor_app.QueryStatusUpdater",
             return_value=MagicMock(),
+        ), patch(
+            "ark_sdk.executor_app.fetch_resumption",
+            new=AsyncMock(return_value=None),
         ):
             await adapter._do_execute(context, event_queue)
 
-        broker.send_messages.assert_not_awaited()
+        broker.create_conversation.assert_awaited_once()
+        broker.get_messages.assert_awaited_once_with("conv-minted")
+        broker.send_messages.assert_awaited_once()
+        assert broker.send_messages.await_args.args[0] == "conv-minted"
+        # The minted id is returned to the controller as the A2A context_id for follow-ups.
+        sent = event_queue.enqueue_event.await_args.args[0]
+        assert sent.context_id == "conv-minted"
 
     @pytest.mark.anyio
     async def test_skipped_when_broker_not_configured(self):
@@ -414,6 +429,126 @@ class TestAdapterConversationScope:
             await adapter._do_execute(context, event_queue)
 
         assert broker_cls.call_args.kwargs["session_id"] == "conv-1"
+
+
+class RecordingExecutor(BaseExecutor):
+    """Captures the request it was given so tests can assert on request.history."""
+
+    def __init__(self, name: str = "test"):
+        super().__init__(name)
+        self.seen_request = None
+
+    async def execute_agent(self, request: ExecutionEngineRequest) -> list[Message]:
+        self.seen_request = request
+        return [Message(role="assistant", content="ok")]
+
+
+def _history_patches(request, broker, resume=None, broker_url="http://broker", target=None):
+    """Patch the ExecutorApp collaborators for a history-load test."""
+    return [
+        patch("ark_sdk.executor_app.extract_query_ref",
+              return_value=QueryRef(name="q", namespace="ns", target=target)),
+        patch("ark_sdk.executor_app.resolve_query", new=AsyncMock(return_value=request)),
+        patch("ark_sdk.executor_app.discover_broker_url", new=AsyncMock(return_value=broker_url)),
+        patch("ark_sdk.executor_app.BrokerClient", return_value=broker),
+        patch("ark_sdk.executor_app.QueryStatusUpdater", return_value=MagicMock()),
+        patch("ark_sdk.executor_app.fetch_resumption", new=AsyncMock(return_value=resume)),
+    ]
+
+
+def _history_broker():
+    broker = AsyncMock()
+    broker.create_conversation = AsyncMock(return_value="conv-minted")
+    broker.get_messages = AsyncMock(return_value=[])
+    broker.send_messages = AsyncMock()
+    broker.send_chunk = AsyncMock()
+    broker.send_final_chunk = AsyncMock()
+    broker.complete = AsyncMock()
+    return broker
+
+
+def _history_context(context_id="conv-1"):
+    context = MagicMock()
+    context.get_user_input.return_value = "hi"
+    context.message.context_id = context_id
+    context.message.message_id = "msg-1"
+    return context
+
+
+class TestAdapterHistoryLoad:
+    @pytest.mark.anyio
+    async def test_loads_history_for_existing_conversation(self):
+        executor = RecordingExecutor()
+        adapter = A2AExecutorAdapter(executor)
+        broker = _history_broker()
+        broker.get_messages = AsyncMock(return_value=[
+            {"role": "user", "content": "old"},
+            {"role": "assistant", "content": "prev"},
+        ])
+        patches = _history_patches(_make_request(conversation_id="conv-1"), broker)
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+            await adapter._do_execute(_history_context("conv-1"), AsyncMock())
+
+        broker.get_messages.assert_awaited_once_with("conv-1")
+        broker.create_conversation.assert_not_awaited()
+        assert executor.seen_request.history == [
+            {"role": "user", "content": "old"},
+            {"role": "assistant", "content": "prev"},
+        ]
+
+    @pytest.mark.anyio
+    async def test_mints_then_loads_when_absent(self):
+        executor = RecordingExecutor()
+        adapter = A2AExecutorAdapter(executor)
+        broker = _history_broker()
+        patches = _history_patches(_make_request(conversation_id=""), broker)
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+            await adapter._do_execute(_history_context(""), AsyncMock())
+
+        broker.create_conversation.assert_awaited_once()
+        broker.get_messages.assert_awaited_once_with("conv-minted")
+        assert executor.seen_request.conversationId == "conv-minted"
+
+    @pytest.mark.anyio
+    async def test_sub_target_does_not_load_history(self):
+        executor = RecordingExecutor()
+        adapter = A2AExecutorAdapter(executor)
+        broker = _history_broker()
+        patches = _history_patches(
+            _make_request(conversation_id="conv-1"), broker,
+            target=QueryTargetRef(type="agent", name="member"),
+        )
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+            await adapter._do_execute(_history_context("conv-1"), AsyncMock())
+
+        broker.get_messages.assert_not_awaited()
+        broker.create_conversation.assert_not_awaited()
+        assert executor.seen_request.history == []
+
+    @pytest.mark.anyio
+    async def test_resume_does_not_load_history(self):
+        executor = RecordingExecutor()
+        adapter = A2AExecutorAdapter(executor)
+        broker = _history_broker()
+        resume = ResumeContext(decision="approved", context=ExecutionContext(), toolCalls=[])
+        patches = _history_patches(_make_request(conversation_id="conv-1"), broker, resume=resume)
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+            await adapter._do_execute(_history_context("conv-1"), AsyncMock())
+
+        broker.get_messages.assert_not_awaited()
+        broker.create_conversation.assert_not_awaited()
+
+    @pytest.mark.anyio
+    async def test_no_broker_leaves_history_empty(self):
+        executor = RecordingExecutor()
+        adapter = A2AExecutorAdapter(executor)
+        broker = _history_broker()
+        patches = _history_patches(_make_request(conversation_id="conv-1"), broker, broker_url=None)
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+            await adapter._do_execute(_history_context("conv-1"), AsyncMock())
+
+        broker.get_messages.assert_not_awaited()
+        assert executor.seen_request.history == []
 
 
 if __name__ == "__main__":

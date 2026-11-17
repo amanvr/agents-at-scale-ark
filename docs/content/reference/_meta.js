@@ -8,6 +8,7 @@ export default {
 
   '---behaviour': { type: 'separator', title: 'System behaviour' },
   'core-architecture': 'Core Architecture',
+  'runtime-model': 'Runtime Execution Model',
   'query-execution': 'Query Execution Flow',
   relationships: 'Resource Relationships',
 

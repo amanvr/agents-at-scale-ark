@@ -57,8 +57,9 @@ spec:
               description:
                 type: string
               executionEngine:
-                description: ExecutionEngine to use for running this agent. If not
-                  specified, uses the built-in OpenAI-compatible engine
+                description: |-
+                  ExecutionEngine to use for running this agent. If not specified, uses the built-in OpenAI-compatible engine.
+                  Deprecated: use runtime instead.
                 properties:
                   name:
                     description: Name of the ExecutionEngine resource to use for this
@@ -329,6 +330,24 @@ spec:
                 type: array
               prompt:
                 type: string
+              runtime:
+                description: Runtime selects execution as a (tier, framework). Preferred
+                  over executionEngine.
+                properties:
+                  framework:
+                    default: completions
+                    description: Framework selects the runner adapter (e.g. completions,
+                      langchain, claude).
+                    type: string
+                  tier:
+                    default: in-process
+                    description: 'Tier selects where the agent runs: in-process (non-sandboxed)
+                      or sandboxed.'
+                    enum:
+                    - in-process
+                    - sandboxed
+                    type: string
+                type: object
               tools:
                 items:
                   properties:

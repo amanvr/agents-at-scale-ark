@@ -1,0 +1,228 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: runtime-selector
+spec:
+  description: >
+    Verify spec.runtime selects execution. An in-process/completions agent runs;
+    runtime takes precedence over a legacy executionEngine (so the agent still runs
+    via completions, not the named engine); and using executionEngine emits a
+    deprecation warning. The sandboxed tier requires a live Substrate backend and
+    is covered by the minikube substrate-executor tests.
+  steps:
+  - name: setup-mock-service
+    try:
+    - apply:
+        file: manifests/a00-mock-openai.yaml
+    - wait:
+        apiVersion: v1
+        kind: Pod
+        name: mock-openai
+        timeout: 2m
+        for:
+          condition:
+            name: Ready
+            value: 'True'
+    catch:
+    - events: {}
+    - describe:
+        apiVersion: v1
+        kind: Pod
+        name: mock-openai
+
+  - name: create-default-model
+    try:
+    - script:
+        content: |
+          kubectl apply -f - <<EOF
+          apiVersion: ark.mckinsey.com/v1alpha1
+          kind: Model
+          metadata:
+            name: default
+            namespace: $NAMESPACE
+          spec:
+            type: completions
+            provider: openai
+            model:
+              value: gpt-5.2
+            pollInterval: 3s
+            config:
+              openai:
+                baseUrl:
+                  value: http://mock-openai.$NAMESPACE.svc.cluster.local/v1
+                apiKey:
+                  value: mock-api-key
+          EOF
+        env:
+        - name: NAMESPACE
+          value: ($namespace)
+    - wait:
+        apiVersion: ark.mckinsey.com/v1alpha1
+        kind: Model
+        name: default
+        timeout: 3m
+        for:
+          condition:
+            name: ModelAvailable
+            value: 'True'
+    catch:
+    - events: {}
+    - describe:
+        apiVersion: ark.mckinsey.com/v1alpha1
+        kind: Model
+        name: default
+
+  - name: in-process-runtime-agent-runs
+    try:
+    - apply:
+        resource:
+          apiVersion: ark.mckinsey.com/v1alpha1
+          kind: Agent
+          metadata:
+            name: in-process-agent
+          spec:
+            prompt: You are a test agent.
+            runtime:
+              tier: in-process
+              framework: completions
+    - assert:
+        resource:
+          apiVersion: ark.mckinsey.com/v1alpha1
+          kind: Agent
+          metadata:
+            name: in-process-agent
+          status:
+            conditions:
+            - type: Available
+              status: "True"
+    - apply:
+        resource:
+          apiVersion: ark.mckinsey.com/v1alpha1
+          kind: Query
+          metadata:
+            name: in-process-query
+          spec:
+            input: "in process please confirm"
+            target:
+              type: agent
+              name: in-process-agent
+    - wait:
+        apiVersion: ark.mckinsey.com/v1alpha1
+        kind: Query
+        name: in-process-query
+        timeout: 60s
+        for:
+          condition:
+            name: Completed
+            value: 'True'
+    - assert:
+        resource:
+          apiVersion: ark.mckinsey.com/v1alpha1
+          kind: Query
+          metadata:
+            name: in-process-query
+          status:
+            (response != null): true
+            (response.target.name): 'in-process-agent'
+    catch:
+    - events: {}
+    - describe:
+        apiVersion: ark.mckinsey.com/v1alpha1
+        kind: Query
+        name: in-process-query
+
+  - name: runtime-wins-over-execution-engine-and-warns
+    try:
+    # The agent declares BOTH an in-process runtime and a legacy executionEngine
+    # pointing at an engine that does not exist. Applying it must emit the
+    # deprecation warning, and its query must still complete because runtime wins
+    # and routes to the completions executor (never to the missing engine).
+    - script:
+        content: |
+          OUTPUT=$(kubectl apply -f - --namespace $NAMESPACE 2>&1 <<EOF
+          apiVersion: ark.mckinsey.com/v1alpha1
+          kind: Agent
+          metadata:
+            name: precedence-agent
+          spec:
+            prompt: You are a test agent.
+            runtime:
+              tier: in-process
+              framework: completions
+            executionEngine:
+              name: nonexistent-engine
+          EOF
+          )
+          echo "$OUTPUT"
+
+          if echo "$OUTPUT" | grep -qF "spec.runtime"; then
+            echo "✓ executionEngine deprecation warning mentions spec.runtime"
+          else
+            echo "✗ missing executionEngine deprecation warning"
+            exit 1
+          fi
+        env:
+        - name: NAMESPACE
+          value: ($namespace)
+    - apply:
+        resource:
+          apiVersion: ark.mckinsey.com/v1alpha1
+          kind: Query
+          metadata:
+            name: precedence-query
+          spec:
+            input: "precedence please confirm"
+            target:
+              type: agent
+              name: precedence-agent
+    - wait:
+        apiVersion: ark.mckinsey.com/v1alpha1
+        kind: Query
+        name: precedence-query
+        timeout: 60s
+        for:
+          condition:
+            name: Completed
+            value: 'True'
+    - assert:
+        resource:
+          apiVersion: ark.mckinsey.com/v1alpha1
+          kind: Query
+          metadata:
+            name: precedence-query
+          status:
+            (response != null): true
+            (response.target.name): 'precedence-agent'
+    catch:
+    - events: {}
+    - describe:
+        apiVersion: ark.mckinsey.com/v1alpha1
+        kind: Query
+        name: precedence-query
+
+  - name: unknown-tier-is-rejected
+    try:
+    - script:
+        content: |
+          OUTPUT=$(kubectl apply -f - --namespace $NAMESPACE 2>&1 <<EOF
+          apiVersion: ark.mckinsey.com/v1alpha1
+          kind: Agent
+          metadata:
+            name: bad-tier-agent
+          spec:
+            prompt: You are a test agent.
+            runtime:
+              tier: bogus
+          EOF
+          )
+          echo "$OUTPUT"
+
+          if echo "$OUTPUT" | grep -qiE "unsupported value|unsupported tier|not available"; then
+            echo "✓ unknown tier rejected"
+          else
+            echo "✗ unknown tier was not rejected"
+            exit 1
+          fi
+        env:
+        - name: NAMESPACE
+          value: ($namespace)

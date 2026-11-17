@@ -1,0 +1,39 @@
+## 1. Phase A — runtime selector (additive, reversible)
+
+- [x] 1.1 Add `spec.runtime { tier, framework }` to the Agent CRD (tier: `in-process` | `sandboxed`; framework string, default `completions`); regenerate CRDs/chart
+- [x] 1.2 Resolve `runtime` → execution tier in the controller dispatch path; map `in-process`→completions executor, `sandboxed`→substrate engine (seam stays internal) (new `resolveRuntimeAddress`; sandboxed resolves the well-known `substrate` ExecutionEngine, preferring the agent's namespace then falling back to `ark-system` where the shared executor is installed — the namespace fallback was added after live minikube testing showed agents outside `ark-system` failed with "execution engine substrate not found"; covered by `TestResolveDispatchAddress` "falls back to ark-system" subtest)
+- [x] 1.3 Honor legacy `spec.executionEngine` with `runtime` taking precedence; emit a deprecation migration-warning when `executionEngine` is used (dispatch prefers runtime; `DefaultAgent` sets a `migration-warning-execution-engine` annotation for named engines, excluding a2a)
+- [x] 1.4 Validation/webhook: reject unknown tier, and a framework not available on the chosen tier (surface, don't silently substitute) (`validateAgentRuntime` + `frameworksByTier`; tier also enum-validated in the CRD)
+- [x] 1.5 e2e: an agent with `runtime: {in-process, completions}` and one with `{sandboxed, completions}` both run; a legacy `executionEngine` agent still runs; `runtime` wins when both set (CI: `TestResolveDispatchAddress` routing/precedence subtests + chainsaw `tests/runtime-selector` for in-process run, runtime-wins-over-executionEngine, deprecation warning, unknown-tier rejected. The `sandboxed`-tier live run stays covered by the minikube `substrate-executor` tests)
+
+## 2. Phase B — frameworks as runner adapters
+
+- [x] 2.1 Confirm/define the runner framework-adapter interface (completions exists); document how an adapter is added (`FrameworkAdapter` ABC + shared `discover_tools`/`invoke_tool_by_name`; README "Adding an adapter" section)
+- [x] 2.2 Implement the LangChain and Claude Agent SDK adapters in the runner (replace the current stubs), reusing the request's model/tools (`LangChainAdapter` drives a `ChatOpenAI` tool-calling loop; `ClaudeAgentSDKAdapter` maps the request onto Claude Agent SDK options; both reuse the shared tool dispatch; optional-dependency extras keep the base image lean; unit tests with injected fakes)
+- [x] 2.3 Resolve `framework` → adapter in the runner; report an unsupported framework instead of defaulting silently (`adapters.select()` raises on unknown; `spec.runtime.framework` is carried to the runner via the existing `framework` parameter — wired in ark-sdk `_build_agent_config`, so it reaches `ARK_FRAMEWORK`; SDK regenerated so the Agent spec now carries `runtime`)
+- [ ] 2.4 Deprecate and migrate the marketplace per-framework executor Deployments onto adapters (subsumes `substrate-execution-backend` task 5.3) — BLOCKED: the per-framework executors live in the separate `agents-at-scale-marketplace` repo; cannot be changed from this repo. Tracked for that repo.
+- [x] 2.5 e2e: an agent on a non-completions framework runs via its adapter on the sandboxed tier (CI: `services/ark-runner/tests/test_adapters.py` runs the langchain + claude adapters via injected fakes, and ark-sdk `test_query_extension.py` proves `spec.runtime.framework` → `framework` parameter. The live sandboxed run uses a langchain/claude-extra runner image on minikube, like the existing `substrate-executor` tests)
+
+## 3. Phase C — mediated multi-agent delegation
+
+- [x] 3.1 ark-sdk: carry `type: agent`/`type: team` tools into the ExecutionEngineRequest (today they are dropped); add the delegation-gateway host to the derived egress allowlist (new `AgentDelegationTool` + `agentTools` request field; `_build_tools` resolves agent/team targets instead of dropping; substrate-executor `_egress_hosts` adds the gateway host and `_runner_env` stamps caller identity + chain, only when agent/team tools are declared)
+- [x] 3.2 Delegation gateway: a thin endpoint (on ark-api or the controller A2A surface) that dispatches a sub-agent/sub-team and returns its result; stateless/request-scoped (ark-api `POST /v1/delegation/delegate`; reuses `a2agw.post_query_and_wait`, extended to carry `conversationId` + annotations; no new orchestrator)
+- [x] 3.3 Gateway authz: authenticate the caller by its actor identity; enforce default-deny against the declared caller→target graph (tools/team membership); add depth/breadth limits and cycle detection (caller from `X-Ark-Caller`; default-deny against the caller Agent CRD's declared agent/team tools; cycle → 409, depth ≥ 8 → 409; breadth is per-call. Cryptographic actor-JWT spoof-resistance is a documented Substrate-dependent follow-up)
+- [x] 3.4 ark-runner: implement the `agent`/`team` tool handler as an outbound call to the gateway (reuse the existing MCP/http outbound-tool pattern — call, block, feed result back) (new `("delegate", (tool, conversationId))` dispatch kind + `_invoke_delegation` httpx POST with `X-Ark-Caller` + chain over egress)
+- [x] 3.5 Ensure delegated participants exchange context via Ark Memory (broker) keyed by conversationId (reuse shipped continuity) (the gateway threads the parent `conversationId` into the child Query; the child executor loads/persists history from the broker via the existing ExecutorApp path)
+- [x] 3.6 e2e: a Team of sandboxed agents runs per strategy; an agent-as-tool call from inside a sandbox returns the target's result; delegation to an undeclared target is refused; a delegation cycle (A→B→A) is halted (CI units green: ark-sdk carry test, substrate-executor egress/env test, ark-runner delegate-dispatch test, ark-api authz 403 / cycle 409 / depth 409 test. Live minikube chainsaw suite authored at `tests/substrate-delegation` — happy paths (agent-as-tool, team-of-sandboxed-agents), labeled `requires-substrate`, excluded from default runs; negative paths covered by the unit tests. Pending a cluster run)
+
+## 4. Phase D — terminal migration (GATED, BREAKING; do not start until the gate is met)
+
+- [ ] 4.1 Gate check: confirm either Substrate peer actor-addressability exists OR the mediated model is accepted at target scale, AND sandbox cold-start latency is acceptable for the common case (`substrate-execution-backend` 4.1/4.3)
+- [ ] 4.2 Bring the `completions` runner adapter to parity with the Go completions executor (memory, teams, streaming, tracing, provider coverage, HITL)
+- [ ] 4.3 Route the controller directly to Substrate; remove the `ExecutionEngine` CRD and `spec.executionEngine` (**BREAKING**)
+- [ ] 4.4 Retire the Go completions executor and the remaining per-framework executor Deployments
+- [ ] 4.5 Migration guide + BREAKING release note for dependents; update `agent-engine-dependency` and `execution-engine-*` specs
+- [ ] 4.6 e2e: the full execution suite (single agent, teams, delegation, HITL, egress, sessions) passes with Substrate as the sole execution path
+
+## 5. Documentation
+
+- [x] 5.1 Document the `runtime = (tier, framework)` model, the two tiers, and adding a framework adapter (`docs/content/reference/runtime-model.mdx` + `spec.runtime` added to the Agent reference; adapter-authoring in the ark-runner README, linked)
+- [x] 5.2 Document mediated multi-agent delegation (teams + agent/team-as-tool) and the default-deny authz graph (`docs/content/developer-guide/multi-agent-delegation.mdx`: gateway, authz graph, cycles/depth, shared state)
+- [x] 5.3 Document the migration from `spec.executionEngine` to `spec.runtime` (precedence, deprecation, eventual removal) (the "Relationship to executionEngine (migration)" section of `runtime-model.mdx`; the Agent reference marks `executionEngine` deprecated in favor of `runtime`)

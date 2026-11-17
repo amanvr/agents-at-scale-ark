@@ -58,6 +58,9 @@ vars:
   ENABLE_ARGO:
     source: env
     default: false
+  ENABLE_SUBSTRATE:
+    source: env
+    default: false
   ENABLE_SSO:
     source: env
     default: false
@@ -159,6 +162,16 @@ profiles:
         value:
           argo-workflows:
             path: ./services/argo-workflows
+  - name: enable-substrate
+    activation:
+      - vars:
+          ENABLE_SUBSTRATE: true
+    patches:
+      - op: add
+        path: dependencies
+        value:
+          ark-substrate-executor:
+            path: ./services/ark-substrate-executor
   - name: enable-sso
     activation:
       - vars:

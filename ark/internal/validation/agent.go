@@ -3,6 +3,7 @@ package validation
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	arkv1alpha1 "mckinsey.com/ark/api/v1alpha1"
@@ -21,6 +22,10 @@ func (v *Validator) ValidateAgent(ctx context.Context, agent *arkv1alpha1.Agent)
 	}
 
 	if err := ValidateUniqueHeaderNames(unselectedModelOverrideHeaders(agent.Spec.Overrides), "spec.overrides"); err != nil {
+		return warnings, err
+	}
+
+	if err := validateAgentRuntime(agent.Spec.Runtime); err != nil {
 		return warnings, err
 	}
 
@@ -91,6 +96,54 @@ func (v *Validator) resolveAgentToolType(ctx context.Context, namespace string, 
 		return ""
 	}
 	return toolCRD.Spec.Type
+}
+
+// frameworksByTier is the set of runner framework adapters available on each
+// execution tier. An agent selecting a framework absent from its tier is
+// rejected rather than silently substituted.
+var frameworksByTier = map[string]map[string]bool{
+	arkv1alpha1.RuntimeTierInProcess: {
+		arkv1alpha1.RuntimeFrameworkCompletions: true,
+	},
+	arkv1alpha1.RuntimeTierSandboxed: {
+		arkv1alpha1.RuntimeFrameworkCompletions: true,
+		"langchain":                             true,
+		"claude":                                true,
+	},
+}
+
+func validateAgentRuntime(runtime *arkv1alpha1.AgentRuntime) error {
+	if runtime == nil {
+		return nil
+	}
+
+	tier := runtime.Tier
+	if tier == "" {
+		tier = arkv1alpha1.RuntimeTierInProcess
+	}
+
+	frameworks, ok := frameworksByTier[tier]
+	if !ok {
+		return fmt.Errorf("spec.runtime.tier: unsupported tier '%s': supported tiers are: %s, %s",
+			tier, arkv1alpha1.RuntimeTierInProcess, arkv1alpha1.RuntimeTierSandboxed)
+	}
+
+	framework := runtime.Framework
+	if framework == "" {
+		framework = arkv1alpha1.RuntimeFrameworkCompletions
+	}
+
+	if !frameworks[framework] {
+		available := make([]string, 0, len(frameworks))
+		for name := range frameworks {
+			available = append(available, name)
+		}
+		sort.Strings(available)
+		return fmt.Errorf("spec.runtime.framework: framework '%s' is not available on the '%s' tier: available frameworks are: %s",
+			framework, tier, strings.Join(available, ", "))
+	}
+
+	return nil
 }
 
 func validateAgentTool(index int, tool arkv1alpha1.AgentTool) error {

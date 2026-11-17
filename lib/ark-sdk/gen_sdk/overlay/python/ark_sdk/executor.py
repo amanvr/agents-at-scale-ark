@@ -70,6 +70,26 @@ class AgentConfig(BaseModel):
     annotations: dict[str, str] = {}
 
 
+class ArgumentMatch(BaseModel):
+    """Narrows tool approval to calls whose argument matches a regex (mirrors Go ArgumentMatch)."""
+    argument: str
+    pattern: str
+
+
+class ToolApprovalConfig(BaseModel):
+    """Per-tool human-approval config (mirrors arkv1alpha1.ToolApprovalConfig)."""
+    required: bool = False
+    timeout: str = ""        # Go-duration string, e.g. "5m"
+    onTimeout: str = ""      # "reject" | "proceed"
+    argumentMatches: list[ArgumentMatch] = []
+
+
+class ToolApproval(BaseModel):
+    """Approval config for one MCP tool, keyed by the tool name the model calls."""
+    tool: str
+    approval: ToolApprovalConfig
+
+
 class MCPServerConfig(BaseModel):
     name: str
     url: str
@@ -77,6 +97,33 @@ class MCPServerConfig(BaseModel):
     timeout: str = "30s"
     headers: dict[str, str] = {}
     tools: list[str] = []
+    # Per-tool approval gates (HITL). Only tools whose approval.required is true appear here.
+    approvals: list[ToolApproval] = []
+
+
+class HTTPTool(BaseModel):
+    """A built-in `http` (fetcher) tool the runner calls directly over HTTP.
+
+    URL may contain `{param}` placeholders filled from the model's call arguments
+    (URL-encoded), mirroring the Go HTTPExecutor. body is a template for POST/PUT/PATCH."""
+    name: str
+    description: str = ""
+    url: str
+    method: str = "GET"
+    headers: dict[str, str] = {}
+    body: str = ""
+    inputSchema: dict[str, Any] = {}
+
+
+class AgentDelegationTool(BaseModel):
+    """An `agent`- or `team`-typed tool a sandboxed agent may invoke via the delegation
+    gateway. The runner calls the gateway (not the target directly — a sandbox cannot address
+    peer actors), which dispatches the target and returns its result."""
+    name: str
+    description: str = ""
+    targetType: str = "agent"   # "agent" | "team"
+    targetName: str = ""
+    targetNamespace: str = ""
 
 
 class Message(BaseModel):
@@ -89,15 +136,66 @@ class Message(BaseModel):
         extra = "allow"
 
 
+class CompletedToolResult(BaseModel):
+    """A tool result already produced in the gated turn (carried across an approval pause)."""
+    id: str
+    name: str = ""
+    content: str = ""
+    error: str = ""
+
+
+class ExecutionContext(BaseModel):
+    """Pending agent state carried across a HITL approval pause (mirrors Go ExecutionContext,
+    plus `messages` since the substrate runner has no in-loop memory and actors are ephemeral)."""
+    conversationId: str = ""
+    pendingToolCallIndex: int = 0
+    completedToolResults: list[CompletedToolResult] = []
+    agentName: str = ""
+    agentNamespace: str = ""
+    messages: list[dict[str, Any]] = []
+
+
+class ResumeContext(BaseModel):
+    """Set on a resumption dispatch after a human approves/rejects gated tool calls."""
+    decision: str                 # "approved" | "rejected"
+    rejectionReason: str = ""     # populated on timeout-reject
+    context: ExecutionContext
+    toolCalls: list[dict[str, Any]] = []
+
+
+class ApprovalRequiredError(Exception):
+    """Raised by execute_agent when a tool call needs human approval. The ExecutorApp turns this
+    into an A2A input-required task so Ark's existing HITL approval/resumption flow takes over."""
+
+    def __init__(self, tool_calls: list[dict[str, Any]], config: ToolApprovalConfig, context: ExecutionContext):
+        super().__init__(f"approval required for {len(tool_calls)} tool call(s)")
+        self.tool_calls = tool_calls
+        self.config = config
+        self.context = context
+
+
 class ExecutionEngineRequest(BaseModel):
     """Request to execute an agent."""
     agent: AgentConfig
     userInput: Message
     mcpServers: list[MCPServerConfig] = []
+    httpTools: list[HTTPTool] = []
+    # `agent`/`team` tools the agent may delegate to via the delegation gateway. Carried for
+    # every executor; the substrate runner invokes them (a sandboxed agent cannot call peer
+    # actors directly). Empty for agents that declare no agent/team tools.
+    agentTools: list[AgentDelegationTool] = []
     conversationId: str = ""
     query_annotations: dict[str, str] = {}
     execution_engine_annotations: dict[str, str] = {}
     message_ttl_seconds: int | None = None
+    # Set only on a resumption dispatch (after a human approval/rejection decision).
+    resume: Optional[ResumeContext] = None
+    # Prior conversation history loaded by the ExecutorApp from Ark Memory (the broker),
+    # oldest-first, OpenAI-format. The runner prepends it between the system prompt and the
+    # current userInput on the fresh path. Empty when there is no broker, a new conversation,
+    # or a resumption (whose pending state already carries the messages). Raw dicts (not Message)
+    # so assistant tool_calls / tool-result fields survive the round-trip.
+    history: list[dict[str, Any]] = []
 
 
 class ExecutionEngineResponse(BaseModel):

@@ -1,0 +1,11 @@
+# An agent-typed Tool that exposes the researcher agent as a callable tool. The coordinator
+# declares this tool; the delegation gateway authorizes the call against it (default-deny).
+apiVersion: ark.mckinsey.com/v1alpha1
+kind: Tool
+metadata:
+  name: researcher-tool
+spec:
+  type: agent
+  description: Ask the researcher a question and get a factual answer.
+  agent:
+    name: researcher

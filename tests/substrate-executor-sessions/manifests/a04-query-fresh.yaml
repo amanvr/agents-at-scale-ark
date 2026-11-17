@@ -1,0 +1,16 @@
+# Control: a DIFFERENT conversationId, so there is no prior history — the agent must not know
+# the favorite color. Proves continuity is scoped to the conversation, not leaked globally.
+apiVersion: ark.mckinsey.com/v1alpha1
+kind: Query
+metadata:
+  name: substrate-sessions-fresh
+spec:
+  input: "What is my favorite color? Reply with exactly one word. If you do not know, reply: unknown"
+  target:
+    type: agent
+    name: substrate-sessions-agent
+  memory:
+    name: default
+    namespace: default
+  conversationId: substrate-sessions-conv-fresh
+  ttl: 1h0m0s

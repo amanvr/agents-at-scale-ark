@@ -140,6 +140,57 @@ var _ = Describe("Agent Webhook", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(agent.Annotations).ToNot(HaveKey(annotations.MigrationWarningPrefix + "tool-type-custom"))
 		})
+
+		It("Should add deprecation warning when executionEngine is used", func() {
+			agent.Spec.ExecutionEngine = &arkv1alpha1.ExecutionEngineRef{Name: "substrate"}
+			err := defaulter.Default(ctx, agent)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(agent.Annotations).To(HaveKey(annotations.MigrationWarningPrefix + "execution-engine"))
+			Expect(agent.Annotations[annotations.MigrationWarningPrefix+"execution-engine"]).To(ContainSubstring("spec.runtime"))
+		})
+
+		It("Should not add executionEngine deprecation warning for a2a agents", func() {
+			agent.Spec.ExecutionEngine = &arkv1alpha1.ExecutionEngineRef{Name: arka2a.ExecutionEngineA2A}
+			err := defaulter.Default(ctx, agent)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(agent.Annotations).ToNot(HaveKey(annotations.MigrationWarningPrefix + "execution-engine"))
+		})
+	})
+
+	Context("When selecting execution via runtime", func() {
+		It("Should accept an unset runtime", func() {
+			warnings, err := validator.ValidateCreate(ctx, agent)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(warnings).To(BeEmpty())
+		})
+
+		It("Should accept in-process tier with completions framework", func() {
+			agent.Spec.Runtime = &arkv1alpha1.AgentRuntime{Tier: "in-process", Framework: "completions"}
+			warnings, err := validator.ValidateCreate(ctx, agent)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(warnings).To(BeEmpty())
+		})
+
+		It("Should accept sandboxed tier with a sandbox-only framework", func() {
+			agent.Spec.Runtime = &arkv1alpha1.AgentRuntime{Tier: "sandboxed", Framework: "langchain"}
+			warnings, err := validator.ValidateCreate(ctx, agent)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(warnings).To(BeEmpty())
+		})
+
+		It("Should reject an unknown tier", func() {
+			agent.Spec.Runtime = &arkv1alpha1.AgentRuntime{Tier: "bogus"}
+			_, err := validator.ValidateCreate(ctx, agent)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("unsupported tier"))
+		})
+
+		It("Should reject a framework not available on the chosen tier", func() {
+			agent.Spec.Runtime = &arkv1alpha1.AgentRuntime{Tier: "in-process", Framework: "langchain"}
+			_, err := validator.ValidateCreate(ctx, agent)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("not available on the 'in-process' tier"))
+		})
 	})
 
 	Context("When validating tool approval config", func() {

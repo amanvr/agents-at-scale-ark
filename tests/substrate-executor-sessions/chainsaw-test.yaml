@@ -1,0 +1,125 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: substrate-executor-sessions
+  labels:
+    # Requires a live Agent Substrate + the ark-substrate-executor deployed and the `substrate`
+    # ExecutionEngine registered (see services/ark-substrate-executor/BRINGUP.md). Also needs a
+    # broker-backed `default` Memory. Excluded from default runs; select explicitly.
+    requires-substrate: "true"
+spec:
+  description: >-
+    Conversation-history continuity for the Substrate execution path (OpenSpec
+    substrate-execution-backend tasks 4.2 + 4.4). Two queries share a conversationId: turn 2 must
+    recall a fact stated only in turn 1 (history loaded from Ark Memory / the broker and prepended
+    by the runner). A third query on a different conversationId must NOT know it.
+  concurrent: false
+  steps:
+  - name: precondition
+    try:
+    - assert:
+        resource:
+          apiVersion: ark.mckinsey.com/v1prealpha1
+          kind: ExecutionEngine
+          metadata:
+            name: substrate
+            namespace: ark-system
+    - assert:
+        resource:
+          apiVersion: ark.mckinsey.com/v1alpha1
+          kind: Memory
+          metadata:
+            name: default
+            namespace: default
+          status:
+            (lastResolvedAddress != null): true
+
+  - name: turn-1-state-fact
+    try:
+    - apply:
+        file: manifests/a00-model.yaml
+    - apply:
+        file: manifests/a01-agent.yaml
+    - apply:
+        file: manifests/a02-query-1.yaml
+    - wait:
+        apiVersion: ark.mckinsey.com/v1alpha1
+        kind: Query
+        name: substrate-sessions-1
+        timeout: 300s
+        for:
+          condition:
+            name: Completed
+            value: 'True'
+    - assert:
+        resource:
+          apiVersion: ark.mckinsey.com/v1alpha1
+          kind: Query
+          metadata:
+            name: substrate-sessions-1
+          status:
+            phase: done
+    catch:
+    - events: {}
+    - describe:
+        apiVersion: ark.mckinsey.com/v1alpha1
+        kind: Query
+        name: substrate-sessions-1
+    - script:
+        content: kubectl logs deploy/ark-substrate-executor -n ark-system --tail=150 || true
+
+  - name: turn-2-recalls-fact
+    try:
+    - apply:
+        file: manifests/a03-query-2.yaml
+    - wait:
+        apiVersion: ark.mckinsey.com/v1alpha1
+        kind: Query
+        name: substrate-sessions-2
+        timeout: 300s
+        for:
+          condition:
+            name: Completed
+            value: 'True'
+    # Continuity proof: the agent recalls the color from turn 1's history.
+    - script:
+        content: |
+          content=$(kubectl get query substrate-sessions-2 -n $NAMESPACE -o jsonpath='{.status.response.content}')
+          echo "turn-2 response: $content"
+          echo "$content" | grep -qi 'teal' \
+            || { echo "FAIL: turn 2 did not recall 'teal' from turn 1 history"; exit 1; }
+    catch:
+    - events: {}
+    - describe:
+        apiVersion: ark.mckinsey.com/v1alpha1
+        kind: Query
+        name: substrate-sessions-2
+    - script:
+        content: kubectl logs deploy/ark-substrate-executor -n ark-system --tail=150 || true
+
+  - name: fresh-conversation-has-no-history
+    try:
+    - apply:
+        file: manifests/a04-query-fresh.yaml
+    - wait:
+        apiVersion: ark.mckinsey.com/v1alpha1
+        kind: Query
+        name: substrate-sessions-fresh
+        timeout: 300s
+        for:
+          condition:
+            name: Completed
+            value: 'True'
+    # A different conversationId has no prior history, so the color must NOT be known.
+    - script:
+        content: |
+          content=$(kubectl get query substrate-sessions-fresh -n $NAMESPACE -o jsonpath='{.status.response.content}')
+          echo "fresh response: $content"
+          echo "$content" | grep -qi 'teal' \
+            && { echo "FAIL: a fresh conversation should not know 'teal'"; exit 1; } || true
+    catch:
+    - events: {}
+    - describe:
+        apiVersion: ark.mckinsey.com/v1alpha1
+        kind: Query
+        name: substrate-sessions-fresh

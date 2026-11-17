@@ -1,0 +1,65 @@
+# ark-substrate-executor chart values. Defaults mirror deploy/minikube-executor.yaml so a
+# plain `helm install` matches the hand-rolled minikube manifest; devspace overrides the image
+# fields with freshly built images.
+
+namespace: ark-system
+
+image:
+  repository: ark-substrate-executor
+  # tag defaults to .Chart.AppVersion if unset
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# The ark-runner image the executor launches as the sandbox actor (passed via ARK_RUNNER_IMAGE).
+# devspace overrides this with the freshly built+published image (${runtime.images.ark-runner}).
+# For a manual `helm install`, set it to a runner image your Substrate worker can pull.
+runnerImage: ark-runner:latest
+
+service:
+  port: 8080
+
+# ExecutionEngine CR registered so agents reach this engine (sandboxed runtime tier / the
+# deprecated spec.executionEngine: substrate).
+executionEngine:
+  name: substrate
+  description: "Runs agents as sandboxed Agent Substrate actors."
+
+# Substrate control-plane wiring. Defaults target the in-cluster ateapi used on minikube.
+substrate:
+  ateapiAddr: "api.ate-system.svc.cluster.local:443"
+  authority: "api.ate-system.svc"
+  atespace: "ate-demo-counter"
+  snapshotUri: "gs://ate-snapshots/ate-demo-counter/"
+  sandboxConfig: "gvisor-default"
+  # Egress-gateway credential injection (zero-creds-in-sandbox). Empty by default so the stack
+  # works out of the box: the executor instead passes the model's own apiKey to the actor (under
+  # the dev allow-all egress), which works with any Model you've configured. To enable injection,
+  # set this to an ate-secret:// URI AND create the referenced Secret, e.g.:
+  #   ate-secret://k8s.io/<ns>/<ns>/<secret>/<key>
+  credentialUri: ""
+  # ateapi TLS auth: a projected SA token (audience = authority) + the servicedns CA bundle.
+  # Disable for a plaintext/local ateapi endpoint.
+  ateapiAuth:
+    enabled: true
+    tokenFile: "/var/run/secrets/ateapi/token"
+    caFile: "/run/servicedns-ca/trust-bundle.pem"
+    tokenAudience: "api.ate-system.svc"
+    clusterTrustBundle: "servicedns.podcert.ate.dev:identity:primary-bundle"
+
+# Dev conveniences (local only). allowAllEgress bypasses the spec-derived allowlist;
+# tlsInsecure skips verifying the egress gateway's re-signed TLS.
+dev:
+  allowAllEgress: true
+  tlsInsecure: true
+
+# Delegation gateway (Phase C): the ark-api endpoint sandboxed agent/team tool calls are POSTed
+# to. Empty disables delegation wiring (plain agents are unaffected either way).
+delegationGatewayUrl: "http://ark-api.default.svc.cluster.local/v1/delegation/delegate"
+
+resources:
+  requests:
+    memory: "128Mi"
+    cpu: "100m"
+  limits:
+    memory: "512Mi"
+    cpu: "500m"

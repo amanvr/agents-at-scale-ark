@@ -85,6 +85,14 @@ const (
 	// the controller prefers an ExecutionEngine of this name in the query's
 	// namespace (a per-tenant deployment) over the central --completions-addr.
 	defaultCompletionsEngineName = "ark-completions"
+	// sandboxedEngineName is the well-known name of the ExecutionEngine backing
+	// the sandboxed runtime tier (the Substrate executor). An agent with
+	// spec.runtime.tier=sandboxed is dispatched to this engine.
+	sandboxedEngineName = "substrate"
+	// sandboxedEngineNamespace is the fallback namespace for the sandboxed engine:
+	// the Substrate executor is installed once here, not per tenant, so an agent in
+	// another namespace still resolves it after the namespace-local lookup misses.
+	sandboxedEngineNamespace = "ark-system"
 	// queryCapacityRequeueDelay is how long Reconcile waits before retrying
 	// when MaxConcurrentQueries is reached. Short enough to be responsive,
 	// long enough to avoid a busy-loop while in-flight queries drain.
@@ -672,6 +680,11 @@ func (r *QueryReconciler) resolveDispatchAddress(ctx context.Context, target ark
 		return r.resolveDefaultEngineAddress(ctx, namespace), nil
 	}
 
+	// runtime takes precedence over the deprecated executionEngine field.
+	if agentCRD.Spec.Runtime != nil {
+		return r.resolveRuntimeAddress(ctx, agentCRD.Spec.Runtime, namespace)
+	}
+
 	if !arka2a.IsNamedEngine(agentCRD.Spec.ExecutionEngine) {
 		return r.resolveDefaultEngineAddress(ctx, namespace), nil
 	}
@@ -682,6 +695,40 @@ func (r *QueryReconciler) resolveDispatchAddress(ctx context.Context, target ark
 	}
 
 	return address, nil
+}
+
+// resolveRuntimeAddress maps an agent's runtime tier to a dispatch address:
+// the sandboxed tier resolves the well-known Substrate ExecutionEngine, while
+// the in-process tier (the default) uses the completions executor. The
+// framework is carried in the dispatched request, not used for routing.
+func (r *QueryReconciler) resolveRuntimeAddress(ctx context.Context, rt *arkv1alpha1.AgentRuntime, namespace string) (string, error) {
+	tier := rt.Tier
+	if tier == "" {
+		tier = arkv1alpha1.RuntimeTierInProcess
+	}
+
+	switch tier {
+	case arkv1alpha1.RuntimeTierSandboxed:
+		// Prefer a namespace-local substrate engine; fall back to the system namespace where
+		// the shared substrate executor is installed (mirrors the completions local/central
+		// split, since the executor is deployed once in ark-system, not per tenant).
+		candidates := []string{namespace}
+		if namespace != sandboxedEngineNamespace {
+			candidates = append(candidates, sandboxedEngineNamespace)
+		}
+		var lastErr error
+		for _, ns := range candidates {
+			ref := &arkv1alpha1.ExecutionEngineRef{Name: sandboxedEngineName, Namespace: ns}
+			address, _, err := arka2a.ResolveExecutionEngineAddress(ctx, r.Client, ref, ns)
+			if err == nil {
+				return address, nil
+			}
+			lastErr = err
+		}
+		return "", lastErr
+	default:
+		return r.resolveDefaultEngineAddress(ctx, namespace), nil
+	}
 }
 
 // resolveDefaultEngineAddress returns the dispatch address for queries with no

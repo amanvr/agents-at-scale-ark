@@ -1,0 +1,98 @@
+---
+title: Runtime Execution Model
+description: How Ark selects execution via runtime = (tier, framework), the two tiers, framework adapters, and migration from executionEngine
+---
+
+import { Callout } from 'nextra/components'
+
+# Runtime Execution Model
+
+An agent's execution is selected by its **runtime**: a `tier` that decides *where* it runs and a
+`framework` that selects the runner adapter. This replaces referencing a per-framework
+[`ExecutionEngine`](/reference/resources/executionengine) with a single declarative selector.
+
+```yaml
+apiVersion: ark.mckinsey.com/v1alpha1
+kind: Agent
+metadata:
+  name: my-agent
+spec:
+  modelRef:
+    name: default
+  runtime:
+    tier: sandboxed      # in-process | sandboxed
+    framework: completions   # completions (default) | langchain | claude
+```
+
+When `runtime` is unset, the agent runs on the **in-process** tier with the **completions**
+framework — today's default behaviour, unchanged.
+
+## Tiers
+
+| Tier | Where it runs | Use for |
+| --- | --- | --- |
+| `in-process` (default) | The built-in completions executor — no sandbox or actor overhead. | Stateless model calls; latency-sensitive work. |
+| `sandboxed` | An isolated [Agent Substrate](/developer-guide/services) actor (gVisor/microVM) with default-deny egress. | Untrusted, tool-using agent code that needs a strong isolation boundary. |
+
+An agent's observable behaviour is equivalent across tiers apart from the isolation and egress
+constraints the sandboxed tier enforces: the same `Agent`, `Model`, and tool spec produces an
+equivalent result (model call, tool use, final output) on either tier.
+
+<Callout type="info">
+  The controller routes by tier: `in-process` dispatches to the completions executor;
+  `sandboxed` dispatches to the `substrate` `ExecutionEngine`. The `ExecutionEngine`/A2A seam
+  stays underneath as internal plumbing — it is no longer a user-facing concept.
+</Callout>
+
+## Frameworks
+
+A framework is a **runner adapter**, selected by configuration — not a separate deployment per
+framework. Introducing a new framework does not require deploying a new execution service.
+
+| Framework | Available on | Notes |
+| --- | --- | --- |
+| `completions` (default) | `in-process`, `sandboxed` | Ark's native prompt + provider-agnostic model client with an MCP/http tool loop. |
+| `langchain` | `sandboxed` | A LangChain tool-calling loop over the agent's model/tools. |
+| `claude` | `sandboxed` | The Claude Agent SDK driving its own reasoning + tool loop. |
+
+A framework that is not available on the chosen tier is **rejected at admission** rather than
+silently substituted. Adding a new adapter is documented in the
+[ark-runner README](https://github.com/mckinsey/agents-at-scale-ark/tree/main/services/ark-runner#adding-an-adapter).
+
+## Relationship to `executionEngine` (migration)
+
+`spec.runtime` supersedes the deprecated [`spec.executionEngine`](/reference/resources/agent) field.
+
+- **Precedence** — when both are set, `runtime` governs execution and `executionEngine` is ignored.
+- **Backward compatible** — an agent that uses only `executionEngine` (and no `runtime`) keeps
+  working exactly as before.
+- **Deprecation** — setting `executionEngine` emits a migration warning (annotation
+  `ark.mckinsey.com/migration-warning-execution-engine`) pointing at `spec.runtime`.
+- **Eventual removal** — `executionEngine` and the `ExecutionEngine` CRD are removed only in a
+  future gated, breaking release, after the completions runner adapter reaches parity. Until then
+  the seam stays and the change is reversible.
+
+Migrate by replacing the engine reference with the equivalent runtime:
+
+```yaml
+# Before — deprecated
+spec:
+  executionEngine:
+    name: substrate
+
+# After
+spec:
+  runtime:
+    tier: sandboxed
+    framework: completions
+```
+
+An agent with no engine reference needs no change — it is already `{ tier: in-process,
+framework: completions }`.
+
+## Related
+
+- [Agent reference](/reference/resources/agent) — the `spec.runtime` and `spec.executionEngine` fields
+- [ExecutionEngine reference](/reference/resources/executionengine) — the underlying dispatch seam
+- [Multi-Agent Delegation](/developer-guide/multi-agent-delegation) — how sandboxed agents call other agents/teams
+- [Core Architecture](/reference/core-architecture) — how the controller dispatches queries

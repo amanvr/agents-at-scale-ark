@@ -249,6 +249,129 @@ func TestResolveDispatchAddress(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, completionsAddr, addr)
 	})
+
+	const substrateAddr = "http://ark-substrate-executor:8080"
+
+	substrateEngine := func(namespace string) *arkv1prealpha1.ExecutionEngine {
+		return &arkv1prealpha1.ExecutionEngine{
+			ObjectMeta: metav1.ObjectMeta{Name: sandboxedEngineName, Namespace: namespace},
+			Status:     arkv1prealpha1.ExecutionEngineStatus{LastResolvedAddress: substrateAddr},
+		}
+	}
+
+	t.Run("runtime in-process tier returns completions address", func(t *testing.T) {
+		agent := &arkv1alpha1.Agent{
+			ObjectMeta: metav1.ObjectMeta{Name: "rt-agent", Namespace: "default"},
+			Spec: arkv1alpha1.AgentSpec{
+				Runtime: &arkv1alpha1.AgentRuntime{Tier: arkv1alpha1.RuntimeTierInProcess},
+			},
+		}
+		r := &QueryReconciler{
+			Client:          fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(agent).Build(),
+			CompletionsAddr: completionsAddr,
+		}
+		target := arkv1alpha1.QueryTarget{Type: targetTypeAgent, Name: "rt-agent"}
+		addr, err := r.resolveDispatchAddress(context.Background(), target, "default")
+		require.NoError(t, err)
+		assert.Equal(t, completionsAddr, addr)
+	})
+
+	t.Run("runtime with empty tier defaults to in-process (completions address)", func(t *testing.T) {
+		agent := &arkv1alpha1.Agent{
+			ObjectMeta: metav1.ObjectMeta{Name: "rt-agent", Namespace: "default"},
+			Spec: arkv1alpha1.AgentSpec{
+				Runtime: &arkv1alpha1.AgentRuntime{Framework: arkv1alpha1.RuntimeFrameworkCompletions},
+			},
+		}
+		r := &QueryReconciler{
+			Client:          fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(agent).Build(),
+			CompletionsAddr: completionsAddr,
+		}
+		target := arkv1alpha1.QueryTarget{Type: targetTypeAgent, Name: "rt-agent"}
+		addr, err := r.resolveDispatchAddress(context.Background(), target, "default")
+		require.NoError(t, err)
+		assert.Equal(t, completionsAddr, addr)
+	})
+
+	t.Run("runtime sandboxed tier returns substrate engine address", func(t *testing.T) {
+		agent := &arkv1alpha1.Agent{
+			ObjectMeta: metav1.ObjectMeta{Name: "sb-agent", Namespace: "default"},
+			Spec: arkv1alpha1.AgentSpec{
+				Runtime: &arkv1alpha1.AgentRuntime{Tier: arkv1alpha1.RuntimeTierSandboxed},
+			},
+		}
+		r := &QueryReconciler{
+			Client:          fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(agent, substrateEngine("default")).Build(),
+			CompletionsAddr: completionsAddr,
+		}
+		target := arkv1alpha1.QueryTarget{Type: targetTypeAgent, Name: "sb-agent"}
+		addr, err := r.resolveDispatchAddress(context.Background(), target, "default")
+		require.NoError(t, err)
+		assert.Equal(t, substrateAddr, addr)
+	})
+
+	t.Run("runtime sandboxed tier falls back to ark-system substrate engine", func(t *testing.T) {
+		// Agent in a tenant namespace; the substrate engine is installed only in ark-system.
+		agent := &arkv1alpha1.Agent{
+			ObjectMeta: metav1.ObjectMeta{Name: "sb-agent", Namespace: "tenant-a"},
+			Spec: arkv1alpha1.AgentSpec{
+				Runtime: &arkv1alpha1.AgentRuntime{Tier: arkv1alpha1.RuntimeTierSandboxed},
+			},
+		}
+		engine := &arkv1prealpha1.ExecutionEngine{
+			ObjectMeta: metav1.ObjectMeta{Name: sandboxedEngineName, Namespace: sandboxedEngineNamespace},
+			Status:     arkv1prealpha1.ExecutionEngineStatus{LastResolvedAddress: substrateAddr},
+		}
+		r := &QueryReconciler{
+			Client:          fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(agent, engine).Build(),
+			CompletionsAddr: completionsAddr,
+		}
+		target := arkv1alpha1.QueryTarget{Type: targetTypeAgent, Name: "sb-agent"}
+		addr, err := r.resolveDispatchAddress(context.Background(), target, "tenant-a")
+		require.NoError(t, err)
+		assert.Equal(t, substrateAddr, addr)
+	})
+
+	t.Run("runtime sandboxed tier with no substrate engine returns error", func(t *testing.T) {
+		agent := &arkv1alpha1.Agent{
+			ObjectMeta: metav1.ObjectMeta{Name: "sb-agent", Namespace: "default"},
+			Spec: arkv1alpha1.AgentSpec{
+				Runtime: &arkv1alpha1.AgentRuntime{Tier: arkv1alpha1.RuntimeTierSandboxed},
+			},
+		}
+		r := &QueryReconciler{
+			Client:          fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(agent).Build(),
+			CompletionsAddr: completionsAddr,
+		}
+		target := arkv1alpha1.QueryTarget{Type: targetTypeAgent, Name: "sb-agent"}
+		_, err := r.resolveDispatchAddress(context.Background(), target, "default")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not found")
+	})
+
+	t.Run("runtime takes precedence over a named executionEngine", func(t *testing.T) {
+		// Agent declares both: an in-process runtime and a legacy named engine.
+		// Runtime must win, so dispatch resolves to completions, not my-engine.
+		agent := &arkv1alpha1.Agent{
+			ObjectMeta: metav1.ObjectMeta{Name: "both-agent", Namespace: "default"},
+			Spec: arkv1alpha1.AgentSpec{
+				Runtime:         &arkv1alpha1.AgentRuntime{Tier: arkv1alpha1.RuntimeTierInProcess},
+				ExecutionEngine: &arkv1alpha1.ExecutionEngineRef{Name: "my-engine"},
+			},
+		}
+		engine := &arkv1prealpha1.ExecutionEngine{
+			ObjectMeta: metav1.ObjectMeta{Name: "my-engine", Namespace: "default"},
+			Status:     arkv1prealpha1.ExecutionEngineStatus{LastResolvedAddress: engineAddr},
+		}
+		r := &QueryReconciler{
+			Client:          fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(agent, engine).Build(),
+			CompletionsAddr: completionsAddr,
+		}
+		target := arkv1alpha1.QueryTarget{Type: targetTypeAgent, Name: "both-agent"}
+		addr, err := r.resolveDispatchAddress(context.Background(), target, "default")
+		require.NoError(t, err)
+		assert.Equal(t, completionsAddr, addr)
+	})
 }
 
 func TestExtractA2AMeta(t *testing.T) {

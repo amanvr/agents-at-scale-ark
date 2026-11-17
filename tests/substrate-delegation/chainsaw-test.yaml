@@ -1,0 +1,87 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: substrate-delegation
+  labels:
+    # Requires a live Agent Substrate control plane + ark-substrate-executor (with the
+    # `substrate` ExecutionEngine) AND the ark-api delegation gateway reachable from the
+    # sandbox (ARK_DELEGATION_GATEWAY_URL set on the executor). Excluded from default runs.
+    requires-substrate: "true"
+spec:
+  description: >
+    Mediated multi-agent delegation for sandboxed agents: an agent-as-tool call from inside a
+    sandbox is mediated by the delegation gateway and returns the target's result; a team of
+    sandboxed agents runs per strategy. Undeclared-target (403) and cycle (409) refusals are
+    covered by unit tests (see README).
+  concurrent: false
+  steps:
+  - name: precondition
+    try:
+    - assert:
+        resource:
+          apiVersion: ark.mckinsey.com/v1prealpha1
+          kind: ExecutionEngine
+          metadata:
+            name: substrate
+            namespace: ark-system
+
+  - name: agent-as-tool-delegation
+    try:
+    - apply:
+        file: manifests/a00-model.yaml
+    - apply:
+        file: manifests/a01-researcher.yaml
+    - apply:
+        file: manifests/a02-researcher-tool.yaml
+    - apply:
+        file: manifests/a03-coordinator.yaml
+    - apply:
+        file: manifests/a04-coordinator-query.yaml
+    - assert:
+        timeout: 300s
+        resource:
+          apiVersion: ark.mckinsey.com/v1alpha1
+          kind: Query
+          metadata:
+            name: delegation-demo
+          status:
+            phase: done
+    # The coordinator must relay the researcher's answer, proving the delegation round-tripped.
+    - assert:
+        resource:
+          apiVersion: ark.mckinsey.com/v1alpha1
+          kind: Query
+          metadata:
+            name: delegation-demo
+          status:
+            (response.content != null): true
+    catch:
+    - events: {}
+    - describe:
+        apiVersion: ark.mckinsey.com/v1alpha1
+        kind: Query
+        name: delegation-demo
+    - script:
+        content: kubectl logs deploy/ark-substrate-executor -n ark-system --tail=100 || true
+
+  - name: team-of-sandboxed-agents
+    try:
+    - apply:
+        file: manifests/a05-team.yaml
+    - apply:
+        file: manifests/a06-team-query.yaml
+    - assert:
+        timeout: 300s
+        resource:
+          apiVersion: ark.mckinsey.com/v1alpha1
+          kind: Query
+          metadata:
+            name: delegation-team-demo
+          status:
+            phase: done
+    catch:
+    - events: {}
+    - describe:
+        apiVersion: ark.mckinsey.com/v1alpha1
+        kind: Query
+        name: delegation-team-demo

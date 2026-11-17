@@ -1,0 +1,10 @@
+apiVersion: ark.mckinsey.com/v1alpha1
+kind: Query
+metadata:
+  name: delegation-team-demo
+spec:
+  input: "What is the tallest mountain on Earth?"
+  target:
+    type: team
+    name: research-team
+  ttl: 10m

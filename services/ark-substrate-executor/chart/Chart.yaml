@@ -1,0 +1,9 @@
+apiVersion: v2
+name: ark-substrate-executor
+description: Ark ExecutionEngine backed by Agent Substrate — runs agents as sandboxed actors
+type: application
+version: 0.1.0
+appVersion: 0.1.0
+annotations:
+  ark.mckinsey.com/service: ark-substrate-executor
+  ark.mckinsey.com/resources: service
