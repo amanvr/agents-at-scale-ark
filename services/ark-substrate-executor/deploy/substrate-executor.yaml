@@ -38,6 +38,12 @@ spec:
             # per-actor allowlist (see egress spec).
             - name: AX_ALLOW_ALL_EGRESS
               value: "true"
+            # Delegation gateway (Phase C): ark-api endpoint a sandboxed agent's agent/team tool
+            # calls are POSTed to. Stamped into the actor env only when the agent declares
+            # agent/team tools; the executor also adds this host to the actor's egress allowlist.
+            # Adjust the namespace/port to your ark-api Service.
+            - name: ARK_DELEGATION_GATEWAY_URL
+              value: "http://ark-api.default.svc.cluster.local/v1/delegation/delegate"
 ---
 apiVersion: v1
 kind: Service

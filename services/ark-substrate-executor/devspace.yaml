@@ -1,0 +1,64 @@
+# DevSpace configuration for ark-substrate-executor (+ the ark-runner image it launches).
+# Opt-in from the root devspace.yaml via ENABLE_SUBSTRATE=true (needs a live Substrate ateapi).
+version: v2beta1
+name: ark-substrate-executor
+
+# Both Dockerfiles build from the repo root (they COPY out/ark-sdk and services/<svc>), so the
+# context is ../.. and the dockerfile paths are repo-relative.
+images:
+  ark-substrate-executor:
+    image: ark-substrate-executor
+    dockerfile: ./Dockerfile
+    context: ../..
+  # Not a deployed workload — the actor image the executor launches (ARK_RUNNER_IMAGE). Agent
+  # Substrate requires the ActorTemplate image to be pinned by DIGEST (snapshots are keyed to it)
+  # and pullable by the worker, so this is pushed to the kind local registry (registry-qualified
+  # name => devspace pushes instead of kind-load) and referenced by digest below. The node's
+  # containerd maps localhost:5001 -> kind-registry, so the worker pulls it.
+  ark-runner:
+    image: localhost:5001/ark-runner
+    dockerfile: ../ark-runner/Dockerfile
+    context: ../..
+
+# devspace exposes no image-digest runtime var, so resolve the registry manifest digest of the
+# just-pushed runner image after build and feed it to the chart (the documented hook pattern).
+# `buildx imagetools inspect` reads the digest straight from the registry for THIS repo (unlike
+# `docker inspect .RepoDigests`, which can return a different repo's digest).
+hooks:
+  - name: runner-digest
+    events: ["after:build"]
+    command: |-
+      docker buildx imagetools inspect "${runtime.images.ark-runner.image}:${runtime.images.ark-runner.tag}" --format '{{.Manifest.Digest}}' | tr -d '\n'
+
+dependencies:
+  ark-sdk:
+    path: ../../lib/ark-sdk
+  # Installs the Agent Substrate control plane into the kind cluster before the executor
+  # deploys (the executor's preflight needs a live ateapi). KIND ONLY — see its README.
+  substrate-control-plane:
+    path: ../substrate-control-plane
+
+pipelines:
+  deploy: |-
+    run_dependency_pipelines --all --pipeline=deploy
+    build_images --all
+    create_deployments --all
+  dev: |-
+    run_dependency_pipelines --all --pipeline=dev
+    build_images --all
+    create_deployments --all
+
+deployments:
+  ark-substrate-executor:
+    namespace: ark-system
+    helm:
+      chart:
+        path: ./chart
+      values:
+        image:
+          repository: ${runtime.images.ark-substrate-executor.image}
+          tag: ${runtime.images.ark-substrate-executor.tag}
+        # The executor launches this image as the sandbox actor. Substrate needs a digest ref,
+        # so compose the registry image name with the digest the runner-digest hook resolved:
+        # localhost:5001/ark-runner@sha256:...  (validated end-to-end on kind).
+        runnerImage: "${runtime.images.ark-runner.image}@${runtime.hooks.runner-digest.stdout}"

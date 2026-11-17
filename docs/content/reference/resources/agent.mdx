@@ -5,7 +5,7 @@ description: Agent CRD reference — fields, tool types, structured output, and 
 
 # Agent
 
-An `Agent` is an execution unit that runs a prompt against a model and can call tools. It resolves a `Model` (directly or via the `default` Model), runs on the built-in completions executor or a named `ExecutionEngine`, and can expose other tools — including HTTP tools, MCP servers, and even other agents or teams — to the model. For a task-oriented walkthrough see [User Guide → Agents](/user-guide/agents); this page is the field-by-field reference.
+An `Agent` is an execution unit that runs a prompt against a model and can call tools. It resolves a `Model` (directly or via the `default` Model), runs via its [runtime](/reference/runtime-model) (a `tier` and `framework`, defaulting to the built-in completions executor), and can expose other tools — including HTTP tools, MCP servers, and even other agents or teams — to the model. For a task-oriented walkthrough see [User Guide → Agents](/user-guide/agents); this page is the field-by-field reference.
 
 ## Spec
 
@@ -73,7 +73,10 @@ spec:
 | `spec.modelRef` | object | no | Model the agent uses. **If omitted, defaults to a `Model` named `default`** in the agent's namespace. The mutating webhook sets the default and marks the agent with the `ark.mckinsey.com/defaulted-model-ref` annotation. A2A and engine-backed agents are not defaulted. |
 | `spec.modelRef.name` | string | yes (when `modelRef` set) | Name of the `Model` resource (minLength 1). |
 | `spec.modelRef.namespace` | string | no | Namespace of the `Model`. Defaults to the agent's namespace. |
-| `spec.executionEngine` | object | no | Named `ExecutionEngine` to run this agent (e.g. LangChain, A2A). **If unset, the built-in completions executor is used.** |
+| `spec.runtime` | object | no | Selects execution as a `(tier, framework)`. See [Runtime Execution Model](/reference/runtime-model). If unset, defaults to `{ tier: in-process, framework: completions }`. Takes precedence over `executionEngine`. |
+| `spec.runtime.tier` | enum (`in-process`, `sandboxed`) | no | Where the agent runs. `in-process` (default) uses the completions executor; `sandboxed` runs it as an isolated Substrate actor with default-deny egress. |
+| `spec.runtime.framework` | string | no | Runner adapter: `completions` (default), `langchain`, or `claude`. A framework not available on the chosen tier is rejected. |
+| `spec.executionEngine` | object | no | **Deprecated — use `spec.runtime`.** Named `ExecutionEngine` to run this agent (e.g. LangChain, A2A). If unset, the built-in completions executor is used. When both are set, `runtime` wins. |
 | `spec.executionEngine.name` | string | yes (when `executionEngine` set) | Name of the `ExecutionEngine` resource (minLength 1). |
 | `spec.executionEngine.namespace` | string | no | Namespace of the `ExecutionEngine`. Defaults to the agent's namespace. |
 | `spec.tools[]` | list | no | Tools exposed to the model. See [Tool types](#tool-types). |

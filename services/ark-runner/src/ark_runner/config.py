@@ -17,6 +17,14 @@ RESULT_PATH_ENV = "ARK_RESULT_PATH"  # where the runner writes its result for th
 RESULT_NONCE_ENV = "ARK_RESULT_NONCE"  # per-query tag stamped on the result/event sentinels
 WORKSPACE_ENV = "ARK_WORKSPACE"
 
+# Delegation (Phase C): the gateway endpoint the runner POSTs agent/team tool calls to, the
+# caller identity it presents, and the ancestor chain (JSON list) for cycle/depth limits.
+# Set by ark-substrate-executor only when the agent declares agent/team tools.
+DELEGATION_GATEWAY_ENV = "ARK_DELEGATION_GATEWAY_URL"
+CALLER_AGENT_ENV = "ARK_CALLER_AGENT"
+CALLER_NAMESPACE_ENV = "ARK_CALLER_NAMESPACE"
+DELEGATION_CHAIN_ENV = "ARK_DELEGATION_CHAIN"
+
 DEFAULT_RESULT_PATH = "/workspace/.ark-result.json"
 DEFAULT_WORKSPACE = "/workspace"
 
@@ -38,6 +46,22 @@ def load_request() -> ExecutionEngineRequest:
 
 def framework() -> str:
     return os.environ.get(FRAMEWORK_ENV, "completions")
+
+
+def delegation_gateway_url() -> str:
+    return os.environ.get(DELEGATION_GATEWAY_ENV, "")
+
+
+def caller_agent() -> str:
+    return os.environ.get(CALLER_AGENT_ENV, "")
+
+
+def caller_namespace() -> str:
+    return os.environ.get(CALLER_NAMESPACE_ENV, "")
+
+
+def delegation_chain() -> str:
+    return os.environ.get(DELEGATION_CHAIN_ENV, "")
 
 
 def nonce() -> str:

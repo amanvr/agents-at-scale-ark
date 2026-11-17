@@ -1,0 +1,127 @@
+---
+title: Multi-Agent Delegation
+description: How sandboxed agents participate in multi-agent work — teams via the coordinator and agent/team-as-tool via the delegation gateway, with a default-deny authz graph
+---
+
+import { Callout } from 'nextra/components'
+
+# Multi-Agent Delegation
+
+Agents on the [`sandboxed` tier](/reference/runtime-model) cannot address each other directly: from
+inside a sandbox, peer actors are unreachable. Ark therefore mediates all multi-agent work for
+sandboxed agents, using only capabilities that exist today — Kubernetes Service reachability plus
+the caller's identity — with no direct actor-to-actor networking.
+
+There are two paths, both mediated:
+
+1. **Teams** run as they always have — the coordinator applies the team strategy
+   (sequential/selector/…) and invokes each member. Members never call each other directly; a
+   member's output is relayed by the coordinator and shared state.
+2. **Agent/team-as-tool** — when a sandboxed agent invokes an `agent`- or `team`-typed tool, the
+   call goes to a **delegation gateway** that dispatches the target and returns its result.
+
+<Callout type="info">
+  Direct actor-to-actor networking ("agents call each other's actors") is out of scope — a spike
+  confirmed Substrate exposes no peer actor-addressability today. It is tracked as a separate
+  Substrate capability.
+</Callout>
+
+## The delegation gateway
+
+The gateway is a thin, stateless, request-scoped endpoint on `ark-api`
+(`POST /v1/delegation/delegate`). It holds no strategy logic — it authorizes a call, then
+dispatches the target as a child `Query` (reusing the standard controller path) and returns the
+result.
+
+```
+sandboxed agent (runner)
+  │  agent/team tool call
+  ▼
+delegation gateway (ark-api)  ── authorize ──► dispatch child Query ──► target agent/team
+  │                                                                         │
+  └───────────────────────── result ◄──────────────────────────────────────┘
+```
+
+The runner reaches the gateway over its default-deny egress: the gateway host is added to the
+actor's egress allowlist automatically when (and only when) the agent declares agent/team tools.
+The runner's delegation call reuses its existing outbound-tool pattern — call, block, feed the
+result back into the model loop — identical in shape to how it calls MCP and http tools.
+
+## Authorization graph (default-deny)
+
+Delegation is **default-deny**. The gateway authenticates the caller by its identity (the runner
+presents `X-Ark-Caller: <namespace>/<agent>`) and allows a call only when the target is one the
+caller **declares as a tool**:
+
+- `agent`-typed tool → the caller may delegate to that `Agent`.
+- `team`-typed tool → the caller may delegate to that `Team`.
+
+A call to a target the caller has not declared is refused (`403`). The permitted
+caller→target edges are exactly the agent/team tools in each agent's spec, so the authz graph is
+derived from the declarative configuration — there is nothing extra to maintain.
+
+<Callout type="warning">
+  The caller identity is stamped by the executor (caller-stamped identity). Cryptographic
+  spoof-resistance — a verifiable Substrate actor token the gateway checks — is a planned
+  hardening that depends on a Substrate capability; it does not change the authz model.
+</Callout>
+
+## Cycles and depth
+
+Each delegation carries the **ancestor chain** (the agents already active in this
+delegation, as the Query annotation `ark.mckinsey.com/delegation-chain`). The gateway:
+
+- refuses a call whose target already appears in the chain — halting cycles such as A→B→A
+  (`409`);
+- refuses a call once the chain reaches the depth limit (`409`).
+
+The chain is threaded parent → request → runner → gateway → child Query, so limits hold across
+arbitrarily nested delegations without any shared gateway state.
+
+## Shared conversation state
+
+Delegated participants exchange context through [Ark Memory](/reference/resources/memory) (the
+broker), keyed by conversation — never through sandbox-local state. The gateway threads the
+parent `conversationId` into the child `Query`, so the delegated agent/team loads the relevant
+history and persists its contribution to the same conversation.
+
+## Example
+
+A sandboxed `coordinator` that delegates to a `researcher`:
+
+```yaml
+apiVersion: ark.mckinsey.com/v1alpha1
+kind: Tool
+metadata:
+  name: researcher-tool
+spec:
+  type: agent
+  agent:
+    name: researcher          # the delegation target
+---
+apiVersion: ark.mckinsey.com/v1alpha1
+kind: Agent
+metadata:
+  name: coordinator
+spec:
+  modelRef:
+    name: default
+  runtime:
+    tier: sandboxed
+    framework: completions
+  tools:
+    - type: agent
+      name: researcher-tool   # the only target the coordinator may reach
+```
+
+Querying `coordinator` runs it as a sandboxed actor; its call to `researcher-tool` is mediated by
+the gateway, which authorizes it (the tool is declared), dispatches `researcher`, and returns its
+answer. A team of sandboxed agents is queried the same way as any team — the coordinator applies
+the strategy and each member runs sandboxed.
+
+## Related
+
+- [Runtime Execution Model](/reference/runtime-model) — tiers and frameworks
+- [Agent reference → Agent and team tools](/reference/resources/agent#agent-and-team-tools)
+- [Team reference](/reference/resources/team) — team strategies
+- [Memory reference](/reference/resources/memory) — shared conversation state

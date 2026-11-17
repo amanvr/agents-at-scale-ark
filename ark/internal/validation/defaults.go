@@ -10,6 +10,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	arkv1alpha1 "mckinsey.com/ark/api/v1alpha1"
+	arka2a "mckinsey.com/ark/internal/a2a"
 	"mckinsey.com/ark/internal/annotations"
 	"mckinsey.com/ark/internal/resolution"
 )
@@ -65,6 +66,16 @@ func defaultAgentModelRef(agent *arkv1alpha1.Agent) {
 
 func DefaultAgent(agent *arkv1alpha1.Agent) {
 	defaultAgentModelRef(agent)
+
+	if arka2a.IsNamedEngine(agent.Spec.ExecutionEngine) {
+		if agent.Annotations == nil {
+			agent.Annotations = make(map[string]string)
+		}
+		agent.Annotations[annotations.MigrationWarningPrefix+"execution-engine"] = fmt.Sprintf(
+			"agent '%s': spec.executionEngine is deprecated, use spec.runtime { tier, framework } instead",
+			agent.Name,
+		)
+	}
 
 	for _, tool := range agent.Spec.Tools {
 		if tool.Type == toolTypeCustom {

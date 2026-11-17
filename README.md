@@ -76,6 +76,92 @@ https://mckinsey.github.io/agents-at-scale-ark/
 
 To troubleshoot an installation, run `ark status`.
 
+## Running Ark on Agent Substrate (sandboxed execution)
+
+This fork's reason for being is a **sandboxed runtime tier**: agents run as isolated
+[Agent Substrate](https://github.com/agent-substrate/substrate) actors (gVisor, default-deny
+egress) instead of ordinary pods. An agent opts in per-spec — nothing else in Ark changes:
+
+```yaml
+apiVersion: ark.mckinsey.com/v1alpha1
+kind: Agent
+metadata: { name: my-agent }
+spec:
+  modelRef: { name: default }
+  runtime:
+    tier: sandboxed          # in-process (default) | sandboxed
+    framework: completions   # completions (default) | langchain | claude
+```
+
+`tier` chooses *where* it runs (the built-in completions executor, or a Substrate actor);
+`framework` chooses which runner adapter runs inside the sandbox. See the
+[Runtime Execution Model](docs/content/reference/runtime-model.mdx) for the full model.
+
+> **⚠️ Kind only.** The Agent Substrate control plane is installed by Substrate's own
+> kind-oriented tooling (a local registry on `localhost:5001`, `ko` image builds, and cluster
+> feature gates like `ClusterTrustBundle`). The sandboxed tier therefore works **only on a kind
+> cluster** — not Minikube or Docker Desktop. The default `in-process` tier (and all of upstream
+> Ark) works anywhere. With the toggle below off, nothing Substrate-related is deployed.
+
+### Prerequisites (host)
+
+- `go`, `ko`, `docker`, `git`
+- `kind` **v0.33.0** (matches the node image Substrate builds; an older kind fails to load
+  images with *"unknown containerd config version"*). Install: `go install sigs.k8s.io/kind@v0.33.0`
+  and ensure it's first on your `PATH`. (`make create-cluster` warns if yours is older.)
+
+### 1. Create the kind cluster
+
+Creates the cluster, the local registry, and the feature gates Substrate needs (a plain
+`kind create cluster` does **not** have these):
+
+```bash
+make -C services/substrate-control-plane create-cluster
+```
+
+### 2. Deploy Ark + Substrate + the sandboxed executor
+
+One toggle builds the executor + runner, installs the Substrate control plane, and registers the
+`substrate` execution engine — in dependency order, control plane first:
+
+```bash
+ENABLE_SUBSTRATE=true devspace deploy      # or `devspace dev` for an interactive session
+```
+
+`ENABLE_SUBSTRATE=true` activates the `enable-substrate` DevSpace profile, which adds
+`services/ark-substrate-executor` as a dependency; that depends on
+`services/substrate-control-plane` (the control-plane install) and on the `ark-runner` image
+(built, pushed to the kind registry, and digest-pinned for the actor). Without the toggle, Ark
+deploys exactly as upstream.
+
+### 3. Run a sandboxed agent
+
+You need a `default` Model (`ark models create default`, or point one at your provider). Then
+apply a sandboxed agent and query it — e.g. the bundled sample:
+
+```bash
+kubectl apply -f samples/runtime-and-hitl/agents.yaml
+kubectl apply -f samples/runtime-and-hitl/queries.yaml
+```
+
+### 4. Verify & see it working
+
+```bash
+make -C services/ark-substrate-executor status   # executor, substrate engine, WorkerPool, model
+make -C services/ark-substrate-executor trace     # fire a sandboxed query and trace every layer
+# (run `make -C services/ark-substrate-executor help` for all observability targets)
+```
+
+### Tear down
+
+```bash
+make -C services/substrate-control-plane delete-cluster
+```
+
+More detail in [`services/substrate-control-plane`](services/substrate-control-plane) (cluster +
+control plane) and [`services/ark-substrate-executor`](services/ark-substrate-executor) (the
+executor, runner adapters, and observability `make` targets).
+
 ## Credits
 
 The initial design and implementation of Ark was led by [Roman Galeev](https://github.com/Roman-Galeev), [Dave Kerr](https://github.com/dwmkerr), and [Chris Madden](https://github.com/cm94242).

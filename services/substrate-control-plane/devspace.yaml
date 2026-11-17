@@ -1,0 +1,11 @@
+# DevSpace dependency that installs the Agent Substrate control plane into a local kind cluster.
+# Pulled in only when ENABLE_SUBSTRATE=true (it is a dependency of ark-substrate-executor, which
+# the root enable-substrate profile adds). KIND ONLY — see ./install.sh and the repo README.
+version: v2beta1
+name: substrate-control-plane
+
+pipelines:
+  deploy:
+    run: ./install.sh
+  dev:
+    run: ./install.sh

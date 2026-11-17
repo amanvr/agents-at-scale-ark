@@ -1,0 +1,19 @@
+# Model the sandboxed agents call. Supply the openai-gateway-key secret (key `token`) before
+# running, or repoint at the cluster's mock-llm for a hermetic run (see substrate-executor).
+apiVersion: ark.mckinsey.com/v1alpha1
+kind: Model
+metadata:
+  name: substrate-model
+spec:
+  provider: openai
+  model:
+    value: gpt-5-nano-2025-08-07
+  config:
+    openai:
+      baseUrl:
+        value: "https://openai.prod.ai-gateway.quantumblack.com/b894067e-6530-4890-aa17-e4d5a999acf4/v1"
+      apiKey:
+        valueFrom:
+          secretKeyRef:
+            name: openai-gateway-key
+            key: token

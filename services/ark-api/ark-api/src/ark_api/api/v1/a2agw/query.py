@@ -16,6 +16,8 @@ logger = logging.getLogger(__name__)
 async def post_query(
     namespace: str, target_type: str, target: str, query: str, timeout: int = 60,
     impersonation: Optional[ImpersonationConfig] = None,
+    conversation_id: Optional[str] = None,
+    annotations: Optional[dict] = None,
 ) -> str:
     """
     Post a query to ARK and return the query name.
@@ -26,23 +28,31 @@ async def post_query(
         target: Name of the target
         query: The input query text
         timeout: Timeout in seconds (default 60)
+        conversation_id: Optional conversation to share history with (delegation)
+        annotations: Optional metadata annotations (e.g. the delegation chain)
 
     Returns:
         The name of the created query
     """
     async with with_ark_client(namespace, V1_ALPHA1, impersonation=impersonation) as ark_client:
-        query_spec = QueryV1alpha1Spec(
-            input=query,
-            target=QueryV1alpha1SpecTarget(name=target, type=target_type),
-            timeout=f"{timeout}s",
-        )
+        spec_kwargs = {
+            "input": query,
+            "target": QueryV1alpha1SpecTarget(name=target, type=target_type),
+            "timeout": f"{timeout}s",
+        }
+        if conversation_id:
+            spec_kwargs["conversationId"] = conversation_id
+        query_spec = QueryV1alpha1Spec(**spec_kwargs)
 
         # Create query object
         query_name = f"a2agw-query-{uuid.uuid4().hex[:8]}"
+        metadata = {"name": query_name, "namespace": namespace}
+        if annotations:
+            metadata["annotations"] = annotations
         query_obj = QueryV1alpha1(
             api_version="ark.mckinsey.com/v1alpha1",
             kind="Query",
-            metadata={"name": query_name, "namespace": namespace},
+            metadata=metadata,
             spec=query_spec,
         )
 
@@ -103,6 +113,8 @@ async def wait_for_query(namespace: str, query_name: str, timeout: int = 60, imp
 async def post_query_and_wait(
     namespace: str, target_type: str, target: str, query: str, timeout: int = 60,
     impersonation: Optional[ImpersonationConfig] = None,
+    conversation_id: Optional[str] = None,
+    annotations: Optional[dict] = None,
 ) -> str:
     """
     Post a query to ARK and wait for the result.
@@ -113,9 +125,14 @@ async def post_query_and_wait(
         target: Name of the target
         query: The input query text
         timeout: Timeout in seconds (default 60)
+        conversation_id: Optional conversation to share history with (delegation)
+        annotations: Optional metadata annotations (e.g. the delegation chain)
 
     Returns:
         The response content from the query
     """
-    query_name = await post_query(namespace, target_type, target, query, timeout, impersonation=impersonation)
+    query_name = await post_query(
+        namespace, target_type, target, query, timeout, impersonation=impersonation,
+        conversation_id=conversation_id, annotations=annotations,
+    )
     return await wait_for_query(namespace, query_name, timeout, impersonation=impersonation)

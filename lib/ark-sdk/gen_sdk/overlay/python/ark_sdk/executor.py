@@ -115,6 +115,17 @@ class HTTPTool(BaseModel):
     inputSchema: dict[str, Any] = {}
 
 
+class AgentDelegationTool(BaseModel):
+    """An `agent`- or `team`-typed tool a sandboxed agent may invoke via the delegation
+    gateway. The runner calls the gateway (not the target directly — a sandbox cannot address
+    peer actors), which dispatches the target and returns its result."""
+    name: str
+    description: str = ""
+    targetType: str = "agent"   # "agent" | "team"
+    targetName: str = ""
+    targetNamespace: str = ""
+
+
 class Message(BaseModel):
     """Message in conversation history."""
     role: str
@@ -169,6 +180,10 @@ class ExecutionEngineRequest(BaseModel):
     userInput: Message
     mcpServers: list[MCPServerConfig] = []
     httpTools: list[HTTPTool] = []
+    # `agent`/`team` tools the agent may delegate to via the delegation gateway. Carried for
+    # every executor; the substrate runner invokes them (a sandboxed agent cannot call peer
+    # actors directly). Empty for agents that declare no agent/team tools.
+    agentTools: list[AgentDelegationTool] = []
     conversationId: str = ""
     query_annotations: dict[str, str] = {}
     execution_engine_annotations: dict[str, str] = {}

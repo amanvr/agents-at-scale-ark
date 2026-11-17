@@ -1,0 +1,94 @@
+# Example agents/teams for the runner-based-execution runtime model + HITL. Apply into a
+# namespace that has a `default` Model and the file-gateway MCP server (tools resolve in the
+# agent's namespace).
+---
+# In-process tier (the default): runs on the built-in completions executor.
+apiVersion: ark.mckinsey.com/v1alpha1
+kind: Agent
+metadata:
+  name: assistant-inproc
+spec:
+  description: Simple assistant on the in-process tier.
+  prompt: "You are a concise assistant. Answer in one short sentence, no preamble."
+  modelRef:
+    name: default
+  runtime:
+    tier: in-process
+    framework: completions
+---
+# A sequential team of two in-process agents.
+apiVersion: ark.mckinsey.com/v1alpha1
+kind: Agent
+metadata:
+  name: researcher
+spec:
+  description: Gathers facts.
+  prompt: "You are a researcher. Give 2-3 concise factual bullet points on the topic."
+  modelRef:
+    name: default
+  runtime:
+    tier: in-process
+---
+apiVersion: ark.mckinsey.com/v1alpha1
+kind: Agent
+metadata:
+  name: writer
+spec:
+  description: Writes a summary.
+  prompt: "You are a writer. Turn the prior research into one tight sentence."
+  modelRef:
+    name: default
+  runtime:
+    tier: in-process
+---
+apiVersion: ark.mckinsey.com/v1alpha1
+kind: Team
+metadata:
+  name: content-team
+spec:
+  strategy: sequential
+  members:
+  - type: agent
+    name: researcher
+  - type: agent
+    name: writer
+---
+# HITL: reads/writes files via file-gateway, but the write op is gated by human approval.
+# The read tool is ungated; only file-gateway-write-file pauses for approval.
+apiVersion: ark.mckinsey.com/v1alpha1
+kind: Agent
+metadata:
+  name: file-writer-hitl
+spec:
+  description: Reads/writes files via file-gateway; writes require human approval.
+  prompt: |
+    You manage files using the available tools. To create or modify a file, call
+    file-gateway-write-file with a "path" and the "content". Use the tools; do not
+    just describe what you would do.
+  modelRef:
+    name: default
+  tools:
+  - type: mcp
+    name: file-gateway-list-directory
+  - type: mcp
+    name: file-gateway-write-file
+    approval:
+      required: true
+      timeout: 10m
+      onTimeout: reject
+---
+# Sandboxed tier: same spec, different tier. Dispatch routes to the `substrate` ExecutionEngine
+# instead of the completions executor. Requires a Substrate control plane + ark-substrate-executor
+# (ENABLE_SUBSTRATE=true devspace dev); without it, queries to this agent error at dispatch.
+apiVersion: ark.mckinsey.com/v1alpha1
+kind: Agent
+metadata:
+  name: assistant-sandboxed
+spec:
+  description: Same assistant, but on the sandboxed tier.
+  prompt: "You are a concise assistant. Answer in one short sentence, no preamble."
+  modelRef:
+    name: default
+  runtime:
+    tier: sandboxed
+    framework: completions

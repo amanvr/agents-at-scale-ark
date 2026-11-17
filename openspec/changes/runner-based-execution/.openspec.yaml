@@ -1,0 +1,6 @@
+schema: spec-driven
+created: 2026-11-06
+goal: Replace the ExecutionEngine selection model with a runner-based execution
+  model (runner = tier + framework); frameworks become runner adapters;
+  multi-agent via mediated delegation; phased toward Substrate-only with the
+  terminal ExecutionEngine removal gated on Substrate actor exposure + latency.

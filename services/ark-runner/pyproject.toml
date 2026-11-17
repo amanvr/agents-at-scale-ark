@@ -8,6 +8,25 @@ dependencies = [
     "httpx",
 ]
 
+[project.optional-dependencies]
+# Framework adapters are optional so the base image stays lean; a langchain- or claude-
+# flavored runner image installs the matching extra. Adapter imports are lazy, so a missing
+# extra only fails when that framework is actually selected.
+langchain = ["langchain-core", "langchain-openai"]
+claude = ["claude-agent-sdk"]
+test = ["pytest", "pytest-asyncio", "ruff", "langchain-core", "langchain-openai", "claude-agent-sdk"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 110
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

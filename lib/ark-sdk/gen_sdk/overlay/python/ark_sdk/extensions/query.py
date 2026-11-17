@@ -15,6 +15,7 @@ from ark_sdk.k8s import create_api_client
 
 from ..executor import (
     AgentConfig,
+    AgentDelegationTool,
     ArgumentMatch,
     ExecutionContext,
     ExecutionEngineRequest,
@@ -288,7 +289,7 @@ async def _resolve_from_query(
 
     agent = await ark.agents.a_get(target_name, namespace)
     agent_config = await _build_agent_config(ark, agent, query, namespace, impersonation)
-    mcp_servers, http_tools = await _build_tools(ark, agent, namespace, impersonation)
+    mcp_servers, http_tools, agent_tools = await _build_tools(ark, agent, namespace, impersonation)
 
     query_annotations = query.metadata.get("annotations", {}) if query.metadata else {}
     execution_engine_annotations = await _resolve_execution_engine_annotations(agent, namespace, impersonation)
@@ -301,6 +302,7 @@ async def _resolve_from_query(
         userInput=Message(role="user", content=user_input),
         mcpServers=mcp_servers,
         httpTools=http_tools,
+        agentTools=agent_tools,
         conversationId=conversation_id,
         query_annotations=query_annotations,
         execution_engine_annotations=execution_engine_annotations,
@@ -397,6 +399,16 @@ async def _build_agent_config(
     prompt = spec.prompt or ""
     for param in parameters:
         prompt = prompt.replace(f"{{{param.name}}}", param.value)
+
+    # Carry spec.runtime.framework to the runner via the existing "framework" parameter the
+    # executor reads (ARK_FRAMEWORK). runtime wins over an explicit parameter. Safe no-op until
+    # the generated spec carries the runtime field (CRD -> SDK regeneration).
+    runtime = _get_attr_or_key(spec, "runtime")
+    if runtime is not None:
+        framework = _get_attr_or_key(runtime, "framework")
+        if framework:
+            parameters = [p for p in parameters if p.name != "framework"]
+            parameters.append(Parameter(name="framework", value=str(framework)))
 
     labels = agent.metadata.get("labels", {}) if agent.metadata else {}
     annotations = agent.metadata.get("annotations", {}) if agent.metadata else {}
@@ -732,17 +744,20 @@ async def _build_tools(
     agent: Any,
     namespace: str,
     impersonation: Optional[ImpersonationConfig] = None,
-) -> tuple[list[MCPServerConfig], list[HTTPTool]]:
+) -> tuple[list[MCPServerConfig], list[HTTPTool], list[AgentDelegationTool]]:
     """Resolve the agent's tools in a single pass (one Tool CRD fetch each): mcp tools into
     MCPServerConfigs (with merged HITL approval), http (fetcher) tools into HTTPTools (mirroring
-    the Go HTTPExecutor contract — url `{param}` templating, method, headers, body). Other tool
+    the Go HTTPExecutor contract — url `{param}` templating, method, headers, body), and
+    agent/team tools into AgentDelegationTools the runner invokes via the delegation gateway
+    (mirroring the Go createAgentExecutor/createTeamExecutor target resolution). Other tool
     types are not supported by ark-sdk executors and are dropped with a warning."""
     if not agent.spec.tools:
-        return [], []
+        return [], [], []
 
     server_tools: dict[str, list[str]] = {}
     server_approvals: dict[str, dict[str, ToolApprovalConfig]] = {}
     http_tools: list[HTTPTool] = []
+    agent_tools: list[AgentDelegationTool] = []
     dropped: list[str] = []
     for agent_tool in agent.spec.tools:
         tool_name = getattr(agent_tool, "name", None)
@@ -798,6 +813,20 @@ async def _build_tools(
                         or getattr(tool_spec, "inputSchema", None)
                     ),
                 ))
+            elif tool_type in ("agent", "team"):
+                ref = getattr(tool_spec, tool_type, None)
+                target_name = _get_attr_or_key(ref, "name") if ref else None
+                if not target_name:
+                    logger.warning(f"{tool_type} tool '{tool_name}' has no target name; skipping")
+                    continue
+                target_namespace = (_get_attr_or_key(ref, "namespace") if ref else None) or namespace
+                agent_tools.append(AgentDelegationTool(
+                    name=tool_name,
+                    description=getattr(tool_spec, "description", "") or "",
+                    targetType=tool_type,
+                    targetName=target_name,
+                    targetNamespace=target_namespace,
+                ))
             elif tool_type:
                 dropped.append(f"{tool_name} ({tool_type})")
         except Exception as e:
@@ -821,6 +850,6 @@ async def _build_tools(
             ]
             servers.append(server_config)
 
-    return servers, http_tools
+    return servers, http_tools, agent_tools
 
 

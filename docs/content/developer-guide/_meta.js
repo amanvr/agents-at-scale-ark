@@ -26,6 +26,7 @@ export default {
   workflows: 'Workflows',
 
   '---advanced': { type: 'separator', title: 'Advanced topics' },
+  'multi-agent-delegation': 'Multi-Agent Delegation',
   'langchain-execution-engine': 'LangChain Execution Engine',
   authentication: 'Authentication',
 

@@ -8,6 +8,7 @@ from .agents import router as agents_router
 from .models import router as models_router
 from .teams import router as teams_router
 from .queries import router as queries_router
+from .delegation import router as delegation_router
 from .tools import router as tools_router
 from .mcp_servers import router as mcp_servers_router
 from .mcp_auth import router as mcp_auth_router
@@ -38,6 +39,7 @@ router.include_router(agents_router)
 router.include_router(models_router)
 router.include_router(teams_router)
 router.include_router(queries_router)
+router.include_router(delegation_router)
 router.include_router(tools_router)
 router.include_router(mcp_servers_router)
 router.include_router(mcp_auth_router)

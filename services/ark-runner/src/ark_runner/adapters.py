@@ -15,8 +15,8 @@ from typing import Any
 from urllib.parse import quote
 
 import httpx
-
 from ark_sdk.executor import (
+    AgentDelegationTool,
     ApprovalRequiredError,
     ExecutionContext,
     ExecutionEngineRequest,
@@ -32,6 +32,8 @@ logger = logging.getLogger(__name__)
 
 MAX_TOOL_ITERATIONS = 10
 HTTP_TOOL_TIMEOUT_SECONDS = 30
+# A delegated agent/team may itself run a full agent loop, so allow longer than a plain http tool.
+DELEGATION_TIMEOUT_SECONDS = 300
 # The egress gateway re-signs outbound TLS with its own CA; the sandbox may not trust it.
 # Mirror model_client: ARK_RUNNER_TLS_INSECURE=true skips verification.
 _TLS_VERIFY = os.environ.get("ARK_RUNNER_TLS_INSECURE", "").lower() not in ("1", "true", "yes")
@@ -86,6 +88,155 @@ def _emit_event(text: str) -> None:
         print(f"{config.EVENT_SENTINEL} {config.nonce()} {text}", flush=True)
 
 
+async def discover_tools(
+    request: ExecutionEngineRequest,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Build the OpenAI tool schema for every available tool and a name->dispatch map.
+
+    Shared by every adapter so tool discovery (MCP + http) is defined once.
+    dispatch[name] = ("mcp", server) for MCP tools, ("http", HTTPTool) for fetcher tools.
+    """
+    tools: list[dict[str, Any]] = []
+    dispatch: dict[str, Any] = {}
+    for server in getattr(request, "mcpServers", None) or []:
+        try:
+            async with MCPClient(server.url, headers=server.headers) as mcp:
+                for tool in await mcp.list_tools():
+                    name = tool["name"]
+                    dispatch[name] = ("mcp", server)
+                    tools.append(
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": name,
+                                "description": tool.get("description", ""),
+                                "parameters": tool.get("inputSchema", {}),
+                            },
+                        }
+                    )
+        except Exception:
+            logger.exception("failed to list tools from MCP server %s", server.name)
+
+    for http_tool in getattr(request, "httpTools", None) or []:
+        dispatch[http_tool.name] = ("http", http_tool)
+        tools.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": http_tool.name,
+                    "description": http_tool.description,
+                    "parameters": http_tool.inputSchema or {"type": "object", "properties": {}},
+                },
+            }
+        )
+
+    # agent/team tools: delegated via the gateway. A single string `input` (mirrors the Go
+    # AgentToolExecutor contract) carrying the task for the target agent/team.
+    conversation_id = getattr(request, "conversationId", "") or ""
+    for agent_tool in getattr(request, "agentTools", None) or []:
+        dispatch[agent_tool.name] = ("delegate", (agent_tool, conversation_id))
+        tools.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": agent_tool.name,
+                    "description": agent_tool.description
+                    or f"Delegate to the {agent_tool.targetType} '{agent_tool.targetName}'.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "input": {
+                                "type": "string",
+                                "description": f"The task to send to the {agent_tool.targetType}.",
+                            }
+                        },
+                        "required": ["input"],
+                    },
+                },
+            }
+        )
+    return tools, dispatch
+
+
+async def invoke_tool_by_name(name: str, args: dict[str, Any], dispatch: dict[str, Any]) -> str:
+    """Run one named tool call (MCP or http) via the dispatch map and return its result text.
+
+    Shared by every adapter so tool execution is defined once, regardless of which framework
+    decided to make the call. An unknown name or a failing tool is returned as an error string
+    so the model sees the failure rather than the query silently succeeding.
+    """
+    _emit_event(f"calling tool {name}({args})")
+    entry = dispatch.get(name)
+    if entry is None:
+        return f"error: no tool named {name!r}"
+    kind, target = entry
+    try:
+        if kind == "http":
+            return await _invoke_http_tool(target, args)
+        if kind == "delegate":
+            agent_tool, conversation_id = target
+            return await _invoke_delegation(agent_tool, args, conversation_id)
+        async with MCPClient(target.url, headers=target.headers) as mcp:
+            return await mcp.call_tool(name, args)
+    except Exception as e:
+        logger.exception("tool %s failed", name)
+        return f"error: {e}"
+
+
+async def _invoke_delegation(tool: AgentDelegationTool, args: dict[str, Any], conversation_id: str) -> str:
+    """Delegate to an agent/team via the gateway (a sandbox cannot address peer actors).
+
+    Presents the runner's caller identity so the gateway can authorize the call against the
+    caller's declared agent/team tools and halt cycles via the ancestor chain. Reuses the
+    egress TLS pattern; a refused/failed delegation is returned as an error string so the
+    model sees it rather than the query silently succeeding.
+    """
+    gateway = config.delegation_gateway_url()
+    if not gateway:
+        return "error: delegation gateway not configured"
+    payload = {
+        "callerAgent": config.caller_agent(),
+        "callerNamespace": config.caller_namespace(),
+        "targetType": tool.targetType,
+        "targetName": tool.targetName,
+        "targetNamespace": tool.targetNamespace,
+        "input": str(args.get("input", "")),
+        "conversationId": conversation_id,
+        "chain": config.delegation_chain(),
+    }
+    headers = {
+        "X-Ark-Caller": f"{config.caller_namespace()}/{config.caller_agent()}",
+        "Content-Type": "application/json",
+    }
+    async with httpx.AsyncClient(timeout=DELEGATION_TIMEOUT_SECONDS, verify=_TLS_VERIFY) as http:
+        resp = await http.post(gateway, headers=headers, json=payload)
+        if resp.status_code >= 400:
+            return (
+                f"error: delegation to {tool.targetType} '{tool.targetName}' failed: "
+                f"HTTP {resp.status_code}: {resp.text}"
+            )
+        data = resp.json()
+        return data.get("result", "")
+
+
+async def _invoke_http_tool(tool: HTTPTool, args: dict[str, Any]) -> str:
+    """Call a built-in http (fetcher) tool. Mirrors the Go HTTPExecutor: {param} URL
+    substitution, method/headers/body, 10MB response cap, non-2xx surfaced as an error.
+    An egress-blocked host raises in httpx and is returned as an error string so the model
+    sees the failure (and the query does not silently succeed)."""
+    url = _substitute_url(tool.url, args)
+    method = (tool.method or "GET").upper()
+    body = None
+    if tool.body and method in ("POST", "PUT", "PATCH"):
+        body = _substitute_url(tool.body, args)
+    async with httpx.AsyncClient(timeout=HTTP_TOOL_TIMEOUT_SECONDS, verify=_TLS_VERIFY) as http:
+        resp = await http.request(method, url, headers=tool.headers or None, content=body)
+        text = resp.text[: 10 << 20]
+        if resp.status_code >= 400:
+            return f"error: HTTP {resp.status_code}: {text} (URL: {url})"
+        return text
+
+
 class FrameworkAdapter(ABC):
     name: str
 
@@ -107,7 +258,7 @@ class CompletionsAdapter(FrameworkAdapter):
     async def run(self, request: ExecutionEngineRequest) -> list[Message]:
         agent = request.agent
 
-        tools, dispatch = await self._discover_tools(request)
+        tools, dispatch = await discover_tools(request)
         logger.info(
             "discovered %d tools from %d MCP server(s) and %d http tool(s)",
             len(tools),
@@ -223,48 +374,6 @@ class CompletionsAdapter(FrameworkAdapter):
                 })
         return messages
 
-    async def _discover_tools(
-        self, request: ExecutionEngineRequest
-    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        """Build the OpenAI tool schema for every available tool and a name->dispatch map.
-
-        dispatch[name] = ("mcp", server) for MCP tools, ("http", HTTPTool) for fetcher tools.
-        """
-        tools: list[dict[str, Any]] = []
-        dispatch: dict[str, Any] = {}
-        for server in getattr(request, "mcpServers", None) or []:
-            try:
-                async with MCPClient(server.url, headers=server.headers) as mcp:
-                    for tool in await mcp.list_tools():
-                        name = tool["name"]
-                        dispatch[name] = ("mcp", server)
-                        tools.append(
-                            {
-                                "type": "function",
-                                "function": {
-                                    "name": name,
-                                    "description": tool.get("description", ""),
-                                    "parameters": tool.get("inputSchema", {}),
-                                },
-                            }
-                        )
-            except Exception:
-                logger.exception("failed to list tools from MCP server %s", server.name)
-
-        for http_tool in getattr(request, "httpTools", None) or []:
-            dispatch[http_tool.name] = ("http", http_tool)
-            tools.append(
-                {
-                    "type": "function",
-                    "function": {
-                        "name": http_tool.name,
-                        "description": http_tool.description,
-                        "parameters": http_tool.inputSchema or {"type": "object", "properties": {}},
-                    },
-                }
-            )
-        return tools, dispatch
-
     async def _invoke_tool(self, call: dict[str, Any], dispatch: dict[str, Any]) -> dict[str, Any]:
         """Run one tool call (MCP or http) and return the OpenAI tool-result message."""
         fn = call.get("function", {})
@@ -273,63 +382,160 @@ class CompletionsAdapter(FrameworkAdapter):
             args = json.loads(fn.get("arguments") or "{}")
         except json.JSONDecodeError:
             args = {}
-        _emit_event(f"calling tool {name}({args})")
-        entry = dispatch.get(name)
-        if entry is None:
-            result = f"error: no tool named {name!r}"
-        else:
-            kind, target = entry
-            try:
-                if kind == "http":
-                    result = await self._invoke_http_tool(target, args)
-                else:
-                    async with MCPClient(target.url, headers=target.headers) as mcp:
-                        result = await mcp.call_tool(name, args)
-            except Exception as e:
-                logger.exception("tool %s failed", name)
-                result = f"error: {e}"
+        result = await invoke_tool_by_name(name, args, dispatch)
         return {"role": "tool", "tool_call_id": call.get("id", ""), "content": result}
-
-    async def _invoke_http_tool(self, tool: HTTPTool, args: dict[str, Any]) -> str:
-        """Call a built-in http (fetcher) tool. Mirrors the Go HTTPExecutor: {param} URL
-        substitution, method/headers/body, 10MB response cap, non-2xx surfaced as an error.
-        An egress-blocked host raises in httpx and is returned as an error string so the model
-        sees the failure (and the query does not silently succeed)."""
-        url = _substitute_url(tool.url, args)
-        method = (tool.method or "GET").upper()
-        body = None
-        if tool.body and method in ("POST", "PUT", "PATCH"):
-            body = _substitute_url(tool.body, args)
-        async with httpx.AsyncClient(timeout=HTTP_TOOL_TIMEOUT_SECONDS, verify=_TLS_VERIFY) as http:
-            resp = await http.request(method, url, headers=tool.headers or None, content=body)
-            text = resp.text[: 10 << 20]
-            if resp.status_code >= 400:
-                return f"error: HTTP {resp.status_code}: {text} (URL: {url})"
-            return text
 
 
 class LangChainAdapter(FrameworkAdapter):
-    """Stub (OpenSpec task 3.2). Implement by driving a LangChain agent from the request's
-    prompt/model/tools, mapping mcpServers to LangChain tools and the model via its config."""
+    """Run the agent as a LangChain tool-calling loop.
+
+    Reuses the request's model config (via a LangChain `ChatOpenAI` pointed at the model's
+    OpenAI-compatible endpoint) and the runner's shared tool dispatch (MCP + http), so tool
+    discovery and execution behave identically across adapters — only the model-reasoning loop
+    is LangChain's. LangChain is an optional dependency; install the `langchain` extra.
+    """
 
     name = "langchain"
 
     async def run(self, request: ExecutionEngineRequest) -> list[Message]:
-        raise NotImplementedError(
-            "langchain adapter not yet implemented; see OpenSpec task 3.2 and CompletionsAdapter"
-        )
+        try:
+            from langchain_core.messages import (
+                AIMessage,
+                HumanMessage,
+                SystemMessage,
+                ToolMessage,
+            )
+        except ImportError as e:  # pragma: no cover - exercised only without the extra installed
+            raise RuntimeError(
+                "langchain framework selected but LangChain is not installed; "
+                "install the ark-runner 'langchain' extra"
+            ) from e
+
+        agent = request.agent
+        tool_schema, dispatch = await discover_tools(request)
+
+        chat = self._build_chat_model(agent.model)
+        if tool_schema:
+            # Bind the OpenAI tool schemas so the model sees each tool's real parameters; the
+            # runner's shared dispatch (not LangChain) executes the calls the model elects.
+            chat = chat.bind_tools(tool_schema)
+
+        messages: list[Any] = [SystemMessage(content=agent.prompt)]
+        for prior in getattr(request, "history", None) or []:
+            role = prior.get("role")
+            content = prior.get("content") or ""
+            if role == "assistant":
+                messages.append(AIMessage(content=content))
+            elif role == "system":
+                messages.append(SystemMessage(content=content))
+            else:
+                messages.append(HumanMessage(content=content))
+        messages.append(HumanMessage(content=request.userInput.content))
+
+        for _ in range(MAX_TOOL_ITERATIONS):
+            ai = await chat.ainvoke(messages)
+            messages.append(ai)
+            if getattr(ai, "content", None):
+                _emit_event(ai.content if isinstance(ai.content, str) else str(ai.content))
+            tool_calls = getattr(ai, "tool_calls", None) or []
+            if not tool_calls:
+                content = ai.content if isinstance(ai.content, str) else str(ai.content or "")
+                return [Message(role="assistant", content=content)]
+            for call in tool_calls:
+                result = await invoke_tool_by_name(call["name"], call.get("args") or {}, dispatch)
+                messages.append(ToolMessage(content=result, tool_call_id=call.get("id", "")))
+
+        logger.warning("langchain tool loop hit MAX_TOOL_ITERATIONS=%d", MAX_TOOL_ITERATIONS)
+        last = messages[-1]
+        content = getattr(last, "content", "") or ""
+        return [Message(role="assistant", content=content if isinstance(content, str) else str(content))]
+
+    def _build_chat_model(self, model: Any) -> Any:
+        """Construct a LangChain chat model from Ark's model config. Overridable in tests.
+
+        Uses the OpenAI-compatible endpoint (openai/azure providers expose one); the model's
+        baseUrl/apiKey come from the same config block the runner's model_client reads.
+        """
+        from langchain_openai import ChatOpenAI
+
+        cfg = getattr(model, "config", None) or {}
+        pc = cfg.get(model.type, {}) if isinstance(cfg, dict) else {}
+        base_url = str(pc.get("baseUrl") or "https://api.openai.com/v1").rstrip("/")
+        api_key = str(pc.get("apiKey") or "placeholder")
+        return ChatOpenAI(model=model.name, base_url=base_url, api_key=api_key, temperature=0)
 
 
 class ClaudeAgentSDKAdapter(FrameworkAdapter):
-    """Stub (OpenSpec task 3.2). Implement by running the Claude Agent SDK against the request's
-    model config, exposing mcpServers to the SDK's MCP support."""
+    """Run the agent via the Claude Agent SDK.
+
+    The SDK owns its own reasoning + tool loop, so this adapter maps the request onto SDK
+    options (system prompt, model, and the request's MCP servers) and collects the SDK's text
+    output. The model's apiKey/baseUrl come from the agent's (anthropic) model config. The
+    Claude Agent SDK is an optional dependency; install the `claude` extra.
+    """
 
     name = "claude"
 
     async def run(self, request: ExecutionEngineRequest) -> list[Message]:
-        raise NotImplementedError(
-            "claude agent sdk adapter not yet implemented; see OpenSpec task 3.2"
+        options = self._build_options(request)
+        prompt = self._build_prompt(request)
+
+        chunks: list[str] = []
+        async for text in self._query(prompt, options):
+            if text:
+                _emit_event(text)
+                chunks.append(text)
+        return [Message(role="assistant", content="".join(chunks))]
+
+    def _build_prompt(self, request: ExecutionEngineRequest) -> str:
+        """The current user input, prepended with prior conversation history if any."""
+        lines: list[str] = []
+        for prior in getattr(request, "history", None) or []:
+            role = prior.get("role") or "user"
+            content = prior.get("content") or ""
+            if content:
+                lines.append(f"{role}: {content}")
+        lines.append(request.userInput.content)
+        return "\n".join(lines)
+
+    def _build_options(self, request: ExecutionEngineRequest) -> Any:
+        """Map the request onto Claude Agent SDK options: system prompt, model, MCP servers."""
+        from claude_agent_sdk import ClaudeAgentOptions
+
+        agent = request.agent
+        model = agent.model
+        cfg = getattr(model, "config", None) or {}
+        pc = cfg.get(model.type, {}) if isinstance(cfg, dict) else {}
+        api_key = str(pc.get("apiKey") or "")
+        base_url = pc.get("baseUrl")
+
+        env: dict[str, str] = {}
+        if api_key:
+            env["ANTHROPIC_API_KEY"] = api_key
+        if base_url:
+            env["ANTHROPIC_BASE_URL"] = str(base_url)
+
+        mcp_servers = {
+            server.name: {"type": "http", "url": server.url, "headers": server.headers or {}}
+            for server in getattr(request, "mcpServers", None) or []
+        }
+
+        return ClaudeAgentOptions(
+            system_prompt=agent.prompt,
+            model=model.name,
+            mcp_servers=mcp_servers,
+            env=env,
         )
+
+    async def _query(self, prompt: str, options: Any):
+        """Yield assistant text blocks from the SDK. A thin seam so tests can inject a fake."""
+        from claude_agent_sdk import AssistantMessage, TextBlock, query
+
+        async for message in query(prompt=prompt, options=options):
+            if isinstance(message, AssistantMessage):
+                for block in message.content:
+                    if isinstance(block, TextBlock):
+                        yield block.text
 
 
 _ADAPTERS: dict[str, type[FrameworkAdapter]] = {

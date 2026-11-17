@@ -1,0 +1,35 @@
+# Example queries for the agents in agents.yaml.
+---
+apiVersion: ark.mckinsey.com/v1alpha1
+kind: Query
+metadata:
+  name: q-inproc
+spec:
+  input: "What is Kubernetes in one sentence?"
+  target:
+    type: agent
+    name: assistant-inproc
+  ttl: 10m
+---
+apiVersion: ark.mckinsey.com/v1alpha1
+kind: Query
+metadata:
+  name: q-team
+spec:
+  input: "The James Webb Space Telescope"
+  target:
+    type: team
+    name: content-team
+  ttl: 10m
+---
+# Pauses at phase: input-required until the write is approved (see README).
+apiVersion: ark.mckinsey.com/v1alpha1
+kind: Query
+metadata:
+  name: q-hitl
+spec:
+  input: "Write a file named greeting.txt at the root of the allowed directory (path '/greeting.txt') with content: hello from ark"
+  target:
+    type: agent
+    name: file-writer-hitl
+  ttl: 15m

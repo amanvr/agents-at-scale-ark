@@ -1,0 +1,14 @@
+# A team of sandboxed agents, run by the existing coordinator (sequential strategy). Members
+# run as sandboxed actors; the team strategy is applied by the completions coordinator, not by
+# member-to-member calls.
+apiVersion: ark.mckinsey.com/v1alpha1
+kind: Team
+metadata:
+  name: research-team
+spec:
+  strategy: sequential
+  members:
+  - type: agent
+    name: researcher
+  - type: agent
+    name: coordinator

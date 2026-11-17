@@ -51,9 +51,20 @@ CREDENTIAL_URI = os.environ.get("ARK_SUBSTRATE_CREDENTIAL_URI", "")
 CREDENTIAL_HEADER = os.environ.get("ARK_SUBSTRATE_CREDENTIAL_HEADER", "Authorization")
 CREDENTIAL_PREFIX = os.environ.get("ARK_SUBSTRATE_CREDENTIAL_PREFIX", "Bearer ")
 
+# Delegation gateway (Phase C, runner-based-execution). A sandboxed agent calls its
+# agent/team tools through this k8s Service (it cannot address peer actors). The runner
+# presents its caller identity; the gateway enforces the declared caller->target graph and
+# halts cycles. Only wired when the agent declares agent/team tools.
+DELEGATION_GATEWAY_URL = os.environ.get("ARK_DELEGATION_GATEWAY_URL", "")
+DELEGATION_CHAIN_ANNOTATION = "ark.mckinsey.com/delegation-chain"
+
 # Runner env contract — must match ark_runner.config (keep in sync).
 REQUEST_ENV = "ARK_AGENT_REQUEST"
 FRAMEWORK_ENV = "ARK_FRAMEWORK"
+DELEGATION_GATEWAY_ENV = "ARK_DELEGATION_GATEWAY_URL"
+CALLER_AGENT_ENV = "ARK_CALLER_AGENT"
+CALLER_NAMESPACE_ENV = "ARK_CALLER_NAMESPACE"
+DELEGATION_CHAIN_ENV = "ARK_DELEGATION_CHAIN"
 RESULT_PATH_ENV = "ARK_RESULT_PATH"
 RESULT_NONCE_ENV = "ARK_RESULT_NONCE"  # keep in sync with ark_runner.config.RESULT_NONCE_ENV
 RESULT_PATH = "/workspace/.ark-result.json"
@@ -105,6 +116,13 @@ def _egress_hosts(request: ExecutionEngineRequest) -> tuple[list[str], list[str]
         if not host:
             continue
         (http if url.startswith("http://") else https).add(host)
+
+    # Delegation gateway: reachable only when the agent declares agent/team tools, so a plain
+    # agent's egress is unchanged (default-deny still applies to everything else).
+    if DELEGATION_GATEWAY_URL and (getattr(request, "agentTools", None) or []):
+        host = _host(DELEGATION_GATEWAY_URL)
+        if host:
+            (http if DELEGATION_GATEWAY_URL.startswith("http://") else https).add(host)
 
     return sorted(http), sorted(https)
 
@@ -275,6 +293,18 @@ class SubstrateExecutor(BaseExecutor):
             RESULT_PATH_ENV: RESULT_PATH,
             RESULT_NONCE_ENV: nonce,
         }
+        # Delegation identity (Phase C): only when the agent declares agent/team tools. The
+        # runner presents ARK_CALLER_* to the gateway, which authorizes the call against the
+        # caller's declared graph; ARK_DELEGATION_CHAIN carries the ancestor chain for cycle
+        # and depth limits.
+        if DELEGATION_GATEWAY_URL and (getattr(request, "agentTools", None) or []):
+            agent = getattr(request, "agent", None)
+            env[DELEGATION_GATEWAY_ENV] = DELEGATION_GATEWAY_URL
+            env[CALLER_AGENT_ENV] = getattr(agent, "name", "") or ""
+            env[CALLER_NAMESPACE_ENV] = getattr(agent, "namespace", "") or ""
+            chain = (getattr(request, "query_annotations", None) or {}).get(DELEGATION_CHAIN_ANNOTATION, "")
+            if chain:
+                env[DELEGATION_CHAIN_ENV] = chain
         # Pass through any ARK_RUNNER_* knobs set on the executor (e.g. ARK_RUNNER_TLS_INSECURE
         # for the dev egress-MITM case) into the actor's container env.
         for key, value in os.environ.items():

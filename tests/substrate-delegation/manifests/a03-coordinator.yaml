@@ -1,0 +1,19 @@
+# A sandboxed coordinator that delegates to the researcher via the agent-typed tool. The
+# runner calls the delegation gateway (it cannot address the researcher's actor directly).
+apiVersion: ark.mckinsey.com/v1alpha1
+kind: Agent
+metadata:
+  name: coordinator
+spec:
+  description: Sandboxed coordinator that delegates to the researcher.
+  prompt: |
+    You coordinate work. To answer any factual question you MUST call the
+    researcher-tool with the question as its "input", then relay its answer verbatim.
+  modelRef:
+    name: substrate-model
+  runtime:
+    tier: sandboxed
+    framework: completions
+  tools:
+  - type: agent
+    name: researcher-tool
